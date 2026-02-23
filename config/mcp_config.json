@@ -1,0 +1,28 @@
+{
+    "google_workspace": {
+        "description": "Google Workspace MCP server (Gmail, Calendar, Drive)",
+        "module": "google_workspace",
+        "tools": [
+            "list_messages",
+            "get_message",
+            "send_email",
+            "mark_read",
+            "mark_unread",
+            "list_labels",
+            "add_label",
+            "remove_label",
+            "list_events",
+            "create_event",
+            "create_meeting"
+        ],
+        "write_actions": [
+            "send_email",
+            "create_event",
+            "create_meeting",
+            "add_label",
+            "remove_label",
+            "mark_read",
+            "mark_unread"
+        ]
+    }
+}
