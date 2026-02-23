@@ -94,7 +94,10 @@ INDRA is built as a **four-node LangGraph StateGraph** orchestrated by a FastAPI
 | **LLM Provider** | Gemini 2.5 Flash | Fast inference with structured output support |
 | **Messaging** | Telegram Bot API | User-facing interface with inline keyboards |
 | **State Persistence** | MemorySaver / SQLite | Graph state checkpointing |
-| **Memory** | JSON + Gemini extraction | Long-term user preference storage |
+| **Memory Extraction** | Gemini 2.5 Flash | Biographical fact extraction |
+| **Semantic Vectors** | FastEmbed | Local BGE embeddings |
+| **Document Store** | SQLite WAL | Fast history and text storage |
+| **Vector DB** | Zvec | In-process semantic retrieval |
 | **Configuration** | Pydantic Settings | Type-safe environment variable management |
 | **Deployment** | Docker + Docker Compose | Containerized local and production deployment |
 
@@ -115,7 +118,8 @@ INDRA is built as a **four-node LangGraph StateGraph** orchestrated by a FastAPI
 8. Pydantic AI enforces AgentResponse schema (HTML-formatted output)
 9. Synthesizer sanitizes response for Telegram
 10. Bot sends rich HTML response back to user
-11. MemoryGate runs in background → extracts facts, stores in JSON
+11. MemoryGate accesses SQLite thread history + FastEmbed vectors
+12. MemoryGate extracts facts, stores texts in SQLite, vectors in Zvec
 ```
 
 ### Write Path (Human-in-the-Loop)
@@ -307,19 +311,17 @@ Formats the agent's response for Telegram delivery.
 
 ### 8. Memory System (`memory.py`)
 
-A background "hippocampus" that learns from every conversation.
+A background "hippocampus" that learns from every conversation, backed by **SQLite** for blazing-fast storage and **Zvec + FastEmbed** for in-process semantic search.
 
 **Architecture:**
 ```
-Conversation → MemoryGate.process() → Gemini Extraction → MemoryStore
-                                           │
-                                           ▼
-                                    ExtractedMemory {
-                                        preferences: ["prefers concise answers"]
-                                        facts: ["works at XYZ Corp"]
-                                        corrections: ["don't use emojis"]
-                                        important: true/false
-                                    }
+Conversation → MemoryGate.process() → Gemini Extraction → ZvecMemoryStore
+                                           │                   │
+                                           ▼                   ▼
+                                    ExtractedMemory     (FastEmbed VDB)
+                                    - Preferences       - 384-dim BGE Vectors
+                                    - Facts             (SQLite Text Store)
+                                    - Corrections       - Text / WAL History
 ```
 
 **Three memory types:**
@@ -330,14 +332,14 @@ Conversation → MemoryGate.process() → Gemini Extraction → MemoryStore
 | **Corrections** | "Don't suggest Python 2" | Explicit user corrections |
 
 **Storage:**
-- `data/user_memory.json` — Raw JSON with preferences, facts, corrections, and last 100 conversation turns
-- `data/user_preferences.md` — Auto-generated human-readable summary, prepended to the agent's system prompt
+- `data/agent_session.db` — SQLite WAL for high-concurrency thread history and memory text storage.
+- `data/zvec_index/` — Zvec highly-optimized, local vector index.
 
 **Design decisions:**
-- **JSON over Vector DB** — Chosen for simplicity and zero infrastructure. The file is small (kilobytes) and the retrieval strategy (last N turns + all preferences) doesn't require semantic search — yet. The `MemoryStore` class is designed as an interface that can be swapped to a vector store later.
-- **Deduplication** — Each new preference/fact is checked against existing entries before insertion to prevent bloat.
-- **Background processing** — Memory extraction runs as an `asyncio.create_task()` after the response is sent, so it never blocks the user.
-- **Lazy agent init** — Same pattern as the router; the extraction agent is lazily initialized to avoid import-time API key errors.
+- **In-process Vector DB (Zvec)** — Chosen over network databases like Pinecone. Zvec provides sub-millisecond local semantic search without infra overhead.
+- **Local Embeddings (FastEmbed)** — We swapped out Gemini APIs for `BAAI/bge-small-en-v1.5` running locally via FastEmbed. This cuts API latency to zero and avoids rate limits entirely while indexing memories.
+- **SQLite WAL** — Write-Ahead Logging allows background memory extraction to write to the DB without locking the read queries from the main LangGraph router.
+- **Background processing** — Memory extraction runs via `asyncio.to_thread` and background tasks after the response is sent, so it never blocks the user.
 
 ---
 
@@ -426,8 +428,8 @@ personal-assistant/
 │   └── google_workspace.py    # Google Workspace MCP server
 │
 ├── data/                      # Runtime data (gitignored)
-│   ├── user_memory.json       # Persistent memory store
-│   └── user_preferences.md    # Auto-generated preferences summary
+│   ├── agent_session.db       # SQLite WAL memory text db
+│   └── zvec_index/            # Zvec vector embeddings
 │
 ├── google_auth_helper.py      # Google OAuth2 token management
 ├── pyproject.toml             # Dependencies & project metadata
@@ -517,7 +519,7 @@ docker compose up --build
 
 - [ ] **MCP Tool Integration** — Wire real Google Workspace tools (Gmail, Calendar, Drive) into the agent node via FastMCP
 - [ ] **Observability** — LangSmith tracing, Logfire/OpenTelemetry metrics, token usage dashboards
-- [ ] **Vector Memory** — Upgrade from JSON to FAISS or Pinecone for semantic memory retrieval
+- [x] **Vector Memory** — Upgraded from JSON to Zvec + FastEmbed for local semantic memory retrieval
 - [ ] **Multi-turn Context** — Pass conversation history through the graph for multi-turn reasoning
 - [ ] **Cost Controls** — Token budgets via Pydantic AI `UsageLimits` and LiteLLM proxy
 - [ ] **Integration Tests** — Comprehensive test suite with mocked Telegram and Gemini
