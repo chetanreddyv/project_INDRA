@@ -18,7 +18,6 @@ from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
-from google import genai
 import zvec
 
 logger = logging.getLogger(__name__)
@@ -187,6 +186,8 @@ class DatabaseClient:
             await asyncio.to_thread(_insert)
 
 
+from fastembed import TextEmbedding
+
 # ==========================================================
 # 3. Zvec Vector Store
 # ==========================================================
@@ -198,15 +199,16 @@ class ZvecMemoryStore:
         self.db = db_client
         self.collection = None
         
-        # Gemini embedding client
-        self.genai_client = genai.Client()
+        # FastEmbed Client (Lightweight local BGE model by default)
+        self.embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+        # bge-small-en-v1.5 embedding dimension is 384
+        self.dim = 384
 
     def initialize(self):
         """Must be called on startup to open the Zvec index."""
-        # Standard embedding dimension for text-embedding-004 is 768
         schema = zvec.CollectionSchema(
             name="agent_memory",
-            vectors=zvec.VectorSchema("embedding", zvec.DataType.VECTOR_FP32, 768),
+            vectors=zvec.VectorSchema("embedding", zvec.DataType.VECTOR_FP32, self.dim),
         )
         
         # If the index already exists, open it. Otherwise create it.
@@ -216,30 +218,18 @@ class ZvecMemoryStore:
             self.collection = zvec.create_and_open(path=ZVEC_PATH, schema=schema)
 
     async def _embed(self, texts: List[str]) -> List[List[float]]:
-        """Generate vector embeddings for semantic search."""
+        """Generate local vector embeddings using FastEmbed."""
         if not texts:
             return []
         
         def _get_embeddings():
-            # For this specific prototype environment, we will use a dummy local embedding 
-            # to verify the Zvec + SQLite architecture because the specific Gemini API key 
-            # or SDK version is struggling with exact embedding model names.
-            # Replace with a working remote embedding client when ready.
             try:
-                # We attempt true embeddings first
-                result = self.genai_client.models.embed_content(
-                    model='text-embedding-004',
-                    contents=texts,
-                )
-                     
-                if isinstance(result, list):
-                     return [e.values for e in result]
-                else:
-                     return [e.embeddings[i].values for i in range(len(result.embeddings))]
+                # FastEmbed returns a generator of numpy arrays, convert to standard lists
+                embeddings_generator = self.embedding_model.embed(texts)
+                return [emb.tolist() for emb in embeddings_generator]
             except Exception as e:
-                logger.warning(f"Using local dummy embeddings. Remote embeddings failed: {e}")
-                # Generate a deterministic dummy vector for testing based on text length
-                return [[float(len(t) % 100) / 100.0] * 768 for t in texts]
+                logger.error(f"FastEmbed failed: {e}")
+                return []
                 
         return await asyncio.to_thread(_get_embeddings)
 

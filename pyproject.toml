@@ -22,14 +22,13 @@ dependencies = [
     "google-auth>=2.0.0",
     "google-auth-oauthlib>=1.0.0",
     "google-api-python-client>=2.0.0",
-    # Memory & embeddings (Gemini-based)
-    "google-genai>=1.0.0",
     "numpy>=1.26.0",
     # Environment
     "python-dotenv>=1.0.0",
     # Observability
     "logfire>=2.0.0",
     "zvec>=0.2.0",
+    "fastembed>=0.7.4",
 ]
 
 [project.optional-dependencies]
