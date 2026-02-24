@@ -222,6 +222,15 @@ class DatabaseClient:
                         )
             await asyncio.to_thread(_tombstone)
 
+    async def touch_item(self, item_id: str):
+        """Update updated_ts of an existing item."""
+        async with self._lock:
+            def _touch():
+                now = datetime.now(timezone.utc).isoformat()
+                with self.get_fast_connection() as conn:
+                    conn.execute("UPDATE memory_items SET updated_ts = ? WHERE id = ?", (now, item_id))
+            await asyncio.to_thread(_touch)
+
     async def insert_memory_item(self, item_id: str, kind: str, text: str, source_thread_id: str = None):
         """Insert a new memory item and sync FTS."""
         async with self._lock:
@@ -392,28 +401,29 @@ class ZvecMemoryStore:
         vector = (await self._embed([query]))[0]
         
         # 1. Vector search (Zvec)
-        zvec_ids = []
+        zvec_ranked = []
         try:
             results = self.collection.query(
                 zvec.VectorQuery("embedding", vector=vector),
                 topk=top_k * 2
             )
-            zvec_ids = [res.id for res in results if res.id != HEALTH_ID]
+            zvec_ranked = [res.id for res in results if res.id != HEALTH_ID]
         except Exception as e:
             logger.error(f"Zvec query failed: {e}")
         
         # 2. BM25 keyword search (FTS5)
         fts_results = await self.db.search_fts(query, limit=top_k * 2)
-        fts_ids = [r["id"] for r in fts_results]
+        fts_ranked = [r["id"] for r in fts_results]
         
-        # 3. Merge + deduplicate (vector results first, then BM25-only)
-        seen = set()
-        merged_ids = []
-        for item_id in zvec_ids + fts_ids:
-            if item_id not in seen:
-                seen.add(item_id)
-                merged_ids.append(item_id)
-        merged_ids = merged_ids[:top_k]
+        # 3. Merge + deduplicate via Reciprocal Rank Fusion (RRF)
+        rrf_scores = {}
+        for rank, item_id in enumerate(zvec_ranked):
+            rrf_scores[item_id] = rrf_scores.get(item_id, 0.0) + 1.0 / (60 + rank + 1)
+            
+        for rank, item_id in enumerate(fts_ranked):
+            rrf_scores[item_id] = rrf_scores.get(item_id, 0.0) + 1.0 / (60 + rank + 1)
+
+        merged_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)[:top_k]
         
         if not merged_ids:
             return ""
@@ -424,7 +434,7 @@ class ZvecMemoryStore:
             return ""
         return "\n".join(f"- [{item['kind']}] {item['text']}" for item in items)
 
-    async def get_relevant_skills(self, query: str, top_k: int = 2, threshold: float = 0.55) -> str:
+    async def get_relevant_skills(self, query: str, top_k: int = 2, threshold: float = 0.75) -> str:
         """Search Zvec for skills relevant to the query. Only returns skills above score threshold."""
         if not self.skill_collection:
             return ""
@@ -496,11 +506,35 @@ class ZvecMemoryStore:
         inserted = 0
         for items, kind in kind_map:
             for text in items:
-                existing = await self.db.item_exists_by_text(text)
-                if not existing:
-                    item_id = f"mem_{uuid.uuid4().hex[:12]}"
-                    await self.db.insert_memory_item(item_id, kind, text, source_thread_id)
-                    inserted += 1
+                existing_id = await self.db.item_exists_by_text(text)
+                if existing_id:
+                    await self.db.touch_item(existing_id)
+                    continue
+                    
+                # Semantic similarity check for deduplication
+                is_duplicate = False
+                if self.collection:
+                    try:
+                        vector = (await self._embed([text]))[0]
+                        results = self.collection.query(
+                            zvec.VectorQuery("embedding", vector=vector),
+                            topk=3
+                        )
+                        for res in results:
+                            if res.id != HEALTH_ID and res.score > 0.92:
+                                await self.db.touch_item(res.id)
+                                logger.info(f"  -> Semantic dedup (>0.92): updated existing item {res.id}")
+                                is_duplicate = True
+                                break
+                    except Exception as e:
+                        logger.error(f"Semantic dedup check failed: {e}")
+                        
+                if is_duplicate:
+                    continue
+                    
+                item_id = f"mem_{uuid.uuid4().hex[:12]}"
+                await self.db.insert_memory_item(item_id, kind, text, source_thread_id)
+                inserted += 1
         
         if inserted:
             logger.info(f"  -> Inserted {inserted} new memory items into SQLite")
