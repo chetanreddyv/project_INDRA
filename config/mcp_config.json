@@ -24,5 +24,15 @@
             "mark_read",
             "mark_unread"
         ]
+    },
+    "web_tools": {
+        "description": "Web Search and Fetch plugin",
+        "enabled": true,
+        "module": "web_tools",
+        "tools": [
+            "web_search",
+            "web_fetch"
+        ],
+        "write_actions": []
     }
 }

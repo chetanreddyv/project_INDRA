@@ -38,16 +38,15 @@ logger = logging.getLogger(__name__)
 
 def _get_tool_registry() -> dict:
     """
-    Lazily load the tool registry from MCP server modules.
+    Lazily load the global tool registry from the mcp_servers plugin manager.
     Maps tool names to their implementing functions.
     """
-    registry = {}
     try:
-        from mcp_servers.google_workspace import TOOL_REGISTRY
-        registry.update(TOOL_REGISTRY)
+        from mcp_servers import GLOBAL_TOOL_REGISTRY
+        return GLOBAL_TOOL_REGISTRY
     except ImportError as e:
-        logger.warning(f"Could not load google_workspace tools: {e}")
-    return registry
+        logger.warning(f"Could not load GLOBAL_TOOL_REGISTRY: {e}")
+        return {}
 
 
 def _execute_tool(action_name: str, tool_args: dict) -> str:

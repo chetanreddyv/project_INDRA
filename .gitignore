@@ -26,3 +26,4 @@ data/
 
 # Google OAuth tokens
 credentials.json
+tests/

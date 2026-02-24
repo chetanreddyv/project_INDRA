@@ -21,6 +21,7 @@ from langgraph.types import Command
 from config.settings import settings
 from telegram import TelegramClient
 from graph import build_graph, checkpointer_context
+from core.lane_manager import lane_manager
 
 # ── Logging ──────────────────────────────────────────────────
 logging.basicConfig(
@@ -147,9 +148,9 @@ async def _poll_telegram():
 
                 logger.info(f"📩 Message from {chat_id}: {text[:100]}")
 
-                # Show typing and run graph SEQUENTIALLY (avoid rate-limiting)
+                # Show typing and run graph SEQUENTIALLY via LaneManager
                 await telegram_client.send_typing_action(chat_id)
-                await _run_graph(chat_id, text)
+                await lane_manager.submit(str(chat_id), _run_graph, chat_id, text)
 
         except asyncio.CancelledError:
             logger.info("📡 Polling stopped")
@@ -242,9 +243,8 @@ async def webhook(request: Request):
         # Show typing indicator
         await telegram_client.send_typing_action(chat_id)
 
-        # Run the graph asynchronously
-        import asyncio
-        asyncio.create_task(_run_graph(chat_id, text))
+        # Run the graph sequentially via LaneManager
+        await lane_manager.submit(str(chat_id), _run_graph, chat_id, text)
 
         return {"status": "processing"}
 
@@ -369,7 +369,24 @@ async def _handle_callback_query(callback_query: dict):
         )
         return {"status": "awaiting_edit"}
 
-    # Resume the graph with the decision
+    # Resume the graph sequentially via LaneManager
+    await lane_manager.submit(
+        thread_id, 
+        _resume_graph, 
+        chat_id, 
+        message_id, 
+        callback_id, 
+        decision, 
+        thread_id
+    )
+
+    return {"status": "resumed"}
+
+
+async def _resume_graph(chat_id: int, message_id: int, callback_id: str, decision: str, thread_id: str):
+    """
+    Actual LangGraph resumption logic, executed sequentially by the LaneManager worker.
+    """
     config = {"configurable": {"thread_id": thread_id}}
     try:
         async for event in graph.astream(
@@ -390,8 +407,6 @@ async def _handle_callback_query(callback_query: dict):
             chat_id=chat_id,
             text=f"❌ Error resuming action:\n`{str(e)[:500]}`",
         )
-
-    return {"status": "resumed"}
 
 
 # ==========================================================
@@ -421,6 +436,7 @@ async def web_chat_send(request: Request):
     """
     Web chat endpoint — runs the LangGraph and returns the result as JSON.
     Supports the same HITL flow as Telegram.
+    Enqueued via LaneManager to avoid race conditions.
     """
     if not graph:
         return JSONResponse({"error": "Graph not initialized"}, status_code=503)
@@ -434,45 +450,50 @@ async def web_chat_send(request: Request):
 
     logger.info(f"🌐 Web chat from {thread_id}: {user_input[:100]}")
 
-    config = {"configurable": {"thread_id": thread_id}}
+    # Enqueue execution and await the future so we can respond to the HTTP request
+    future = await lane_manager.submit(thread_id, _run_web_graph, thread_id, user_input)
     try:
-        async for event in graph.astream(
-            {
-                "chat_id": thread_id,
-                "user_input": user_input,
-                "tool_failure_count": 0,
-            },
-            config=config,
-            stream_mode="updates",
-        ):
-            pass
-
-        state = await graph.aget_state(config)
-
-        if state.next:
-            # Graph is paused — HITL approval needed
-            interrupted = state.tasks[0].interrupts[0].value
-            return JSONResponse({
-                "approval_required": True,
-                "action": interrupted.get("action", "unknown"),
-                "details": interrupted.get("details", ""),
-                "tool_args": interrupted.get("tool_args", {}),
-            })
-        else:
-            # Graph completed
-            response = state.values.get("agent_response", "Done!")
-            asyncio.create_task(_run_memorygate(thread_id, user_input, response))
-            return JSONResponse({"response": response})
-
+        result = await future
+        return JSONResponse(result)
     except Exception as e:
         logger.error(f"❌ Web chat error: {e}", exc_info=True)
         return JSONResponse({"error": str(e)[:500]})
+
+async def _run_web_graph(thread_id: str, user_input: str) -> dict:
+    """Internal graph runner for web chat, executed sequentially."""
+    config = {"configurable": {"thread_id": thread_id}}
+    async for event in graph.astream(
+        {
+            "chat_id": thread_id,
+            "user_input": user_input,
+            "tool_failure_count": 0,
+        },
+        config=config,
+        stream_mode="updates",
+    ):
+        pass
+
+    state = await graph.aget_state(config)
+
+    if state.next:
+        interrupted = state.tasks[0].interrupts[0].value
+        return {
+            "approval_required": True,
+            "action": interrupted.get("action", "unknown"),
+            "details": interrupted.get("details", ""),
+            "tool_args": interrupted.get("tool_args", {}),
+        }
+    else:
+        response = state.values.get("agent_response", "Done!")
+        asyncio.create_task(_run_memorygate(thread_id, user_input, response))
+        return {"response": response}
 
 
 @app.post("/api/chat/approve")
 async def web_chat_approve(request: Request):
     """
     Web chat HITL approval — resumes the paused graph.
+    Enqueued via LaneManager.
     """
     if not graph:
         return JSONResponse({"error": "Graph not initialized"}, status_code=503)
@@ -483,22 +504,28 @@ async def web_chat_approve(request: Request):
 
     logger.info(f"🌐 Web approval: {decision} for thread {thread_id}")
 
-    config = {"configurable": {"thread_id": thread_id}}
+    future = await lane_manager.submit(thread_id, _resume_web_graph, thread_id, decision)
     try:
-        async for event in graph.astream(
-            Command(resume=decision),
-            config=config,
-            stream_mode="updates",
-        ):
-            pass
-
-        state = await graph.aget_state(config)
-        response = state.values.get("agent_response", "Done!")
-        return JSONResponse({"response": response})
-
+        result = await future
+        return JSONResponse(result)
     except Exception as e:
         logger.error(f"❌ Web approval error: {e}", exc_info=True)
         return JSONResponse({"error": str(e)[:500]})
+
+
+async def _resume_web_graph(thread_id: str, decision: str) -> dict:
+    """Internal graph resumer for web chat, executed sequentially."""
+    config = {"configurable": {"thread_id": thread_id}}
+    async for event in graph.astream(
+        Command(resume=decision),
+        config=config,
+        stream_mode="updates",
+    ):
+        pass
+
+    state = await graph.aget_state(config)
+    response = state.values.get("agent_response", "Done!")
+    return {"response": response}
 
 
 # ==========================================================

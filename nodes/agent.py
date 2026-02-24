@@ -75,41 +75,40 @@ def _load_mcp_config() -> dict:
     return {}
 
 
-def _get_write_action_set() -> set[str]:
+def _get_enabled_tools_and_write_actions() -> tuple[list[str], set[str], dict[str, str]]:
     """
-    Return the flat set of write/destructive action names defined
-    across ALL skills in mcp_config.json.
-
-    This is the single source of truth — the LLM has no say in
-    whether a given tool name requires approval.
+    Return enabled tools, write actions, and action-to-skill mapping based on mcp_config.json.
     """
     config = _load_mcp_config()
-    write_actions: set[str] = set()
-    for skill_config in config.values():
-        if isinstance(skill_config, dict):
-            write_actions.update(skill_config.get("write_actions", []))
-    return write_actions
+    enabled_tools = []
+    write_actions = set()
+    action_skill_map = {}
+    
+    for skill_name, skill_cfg in config.items():
+        if isinstance(skill_cfg, dict) and skill_cfg.get("enabled", True):
+            skill_tools = skill_cfg.get("tools", [])
+            skill_write_actions = skill_cfg.get("write_actions", [])
+            
+            enabled_tools.extend(skill_tools)
+            write_actions.update(skill_write_actions)
+            
+            for action in skill_tools:
+                action_skill_map[action] = skill_name
+                
+    return enabled_tools, write_actions, action_skill_map
 
 
-def _make_write_action_tool(action_name: str, skill_name: str):
+def _make_write_action_tool(action_name: str, skill_name: str, real_func):
     """
     Return a Pydantic AI–compatible async tool function that
     *intercepts* the call and raises ``WriteActionRequiresApproval``
     before any real side-effect runs.
 
-    Copies the real tool's signature and docstring from the MCP server
-    module so the LLM sees proper parameter schemas.
+    Copies the real tool's signature and docstring from the real function
+    so the LLM sees proper parameter schemas.
     """
     import inspect
     import functools
-
-    # Try to load the real function's metadata for accurate schema
-    real_func = None
-    try:
-        from mcp_servers.google_workspace import TOOL_REGISTRY
-        real_func = TOOL_REGISTRY.get(action_name)
-    except ImportError:
-        pass
 
     async def _interceptor(**kwargs) -> str:
         logger.warning(
@@ -178,31 +177,33 @@ async def agent_node(state: dict) -> dict:
     prompt_parts.append(skill_prompts)
     full_system_prompt = "\n\n---\n\n".join(prompt_parts)
 
-    # ── Build Python write-action interceptors ──────────────────────
-    # These are registered as tools on the agent so the LLM can
-    # "call" them — but Python immediately raises an exception
-    # before any real side-effect occurs.
-    write_actions = _get_write_action_set()
-    config = _load_mcp_config()
-
-    # Build a map of action → skill name for clear logging
-    action_skill_map: dict[str, str] = {}
-    for skill_name, skill_cfg in config.items():
-        if isinstance(skill_cfg, dict):
-            for action in skill_cfg.get("write_actions", []):
-                action_skill_map[action] = skill_name
-
-    interceptor_tools = [
-        _make_write_action_tool(action, action_skill_map.get(action, "unknown"))
-        for action in write_actions
-    ]
+    # ── Build Pydantic AI Tools ─────────────────────────────────────
+    # Load all enabled tools from the global registry.
+    # Write actions get wrapped in an interceptor for HITL approval.
+    # Read actions are passed directly as plain functions.
+    enabled_tool_names, write_actions, action_skill_map = _get_enabled_tools_and_write_actions()
+    
+    from mcp_servers import GLOBAL_TOOL_REGISTRY
+    
+    all_tools = []
+    for action_name in enabled_tool_names:
+        real_func = GLOBAL_TOOL_REGISTRY.get(action_name)
+        if not real_func:
+            logger.warning(f"  -> Tool {action_name} enabled in config but missing from registry.")
+            continue
+            
+        if action_name in write_actions:
+            skill_name = action_skill_map.get(action_name, "unknown")
+            all_tools.append(_make_write_action_tool(action_name, skill_name, real_func))
+        else:
+            all_tools.append(real_func)
 
     # ── Create agent ────────────────────────────────────────────────
     agent = Agent(
         "google-gla:gemini-2.5-flash",
         system_prompt=full_system_prompt,
         output_type=AgentResponse,
-        tools=interceptor_tools,
+        tools=all_tools,
     )
 
     try:
