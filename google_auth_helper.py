@@ -2,7 +2,7 @@
 google_auth_helper.py — Shared Google OAuth credential loader.
 
 Production strategy (configure once, forget):
-  1. Run `python auth_google.py` locally to generate token.json.
+  1. Run `python google_auth_helper.py` locally to generate token.json.
   2. Base64-encode it: python -c "import base64; print(base64.b64encode(open('token.json','rb').read()).decode())"
   3. Set GOOGLE_TOKEN_JSON=<that base64 string> as an Azure secret.
   4. The app reads from the env var in production, or falls back to the local file.
@@ -17,9 +17,9 @@ import os
 import base64
 import json
 import logging
-import tempfile
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +73,7 @@ def get_google_creds() -> Credentials:
             logger.info(f"🔑 Loaded Google credentials from local {local_path}")
         else:
             raise RuntimeError(
-                "No Google credentials found. Either:\n"
-                "  • Set GOOGLE_TOKEN_JSON env var (base64-encoded token.json), or\n"
-                "  • Run `python auth_google.py` to create a local token.json"
+                "No Google credentials found in token.json. Run `python google_auth_helper.py` to create one."
             )
 
     # ── 3. Refresh if expired ────────────────────────────────────────────────────
@@ -92,8 +90,33 @@ def get_google_creds() -> Credentials:
         else:
             raise RuntimeError(
                 "Google credentials are invalid and cannot be refreshed. "
-                "Please re-run `python auth_google.py` and update GOOGLE_TOKEN_JSON."
+                "Please re-run `python google_auth_helper.py` and update token.json."
             )
 
     _cached_creds = creds
     return creds
+
+
+if __name__ == "__main__":
+    # Setup logging for the standalone script
+    logging.basicConfig(level=logging.INFO)
+    
+    CREDENTIALS_FILE = "credentials.json"
+    TOKEN_FILE = "token.json"
+
+    if not os.path.exists(CREDENTIALS_FILE):
+        print(f"❌ Error: {CREDENTIALS_FILE} not found in the root directory.")
+        print("Please download it from the Google Cloud Console (Desktop App type).")
+        exit(1)
+
+    print(f"🚀 Starting Google OAuth flow for scopes: {SCOPES}")
+    flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
+    creds = flow.run_local_server(port=0)
+
+    with open(TOKEN_FILE, "w") as token:
+        token.write(creds.to_json())
+
+    print(f"✅ Success! Generated {TOKEN_FILE}")
+    print("\nNext steps for production:")
+    print("1. Encode token.json: python -c \"import base64; print(base64.b64encode(open('token.json','rb').read()).decode())\"")
+    print("2. Set the result as the GOOGLE_TOKEN_JSON environment variable.")

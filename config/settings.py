@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # ── Telegram ──────────────────────────────────────────────
-    telegram_bot_token: str = Field(..., description="Telegram bot token from @BotFather")
+    telegram_bot_token: str = Field(default="", description="Telegram bot token from @BotFather")
     telegram_secret_token: str = Field(
         default="", description="Secret token for webhook verification"
     )
@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     )
 
     # ── LLM (Gemini) ─────────────────────────────────────────
-    google_api_key: str = Field(..., description="Google AI Studio API key (used by Pydantic AI)")
+    google_api_key: str = Field(default="", description="Google AI Studio API key (used by Pydantic AI)")
 
     # ── Observability (optional) ──────────────────────────────
     langchain_tracing_v2: bool = Field(default=False)
@@ -37,6 +37,16 @@ class Settings(BaseSettings):
         if not self.allowed_chat_ids:
             return []
         return [int(cid.strip()) for cid in self.allowed_chat_ids.split(",") if cid.strip()]
+
+    @property
+    def needs_onboarding(self) -> bool:
+        """True if critical keys are missing and onboarding should run."""
+        return not self.google_api_key or not self.telegram_bot_token
+
+    @property
+    def is_configured(self) -> bool:
+        """True if all critical keys are set."""
+        return bool(self.google_api_key and self.telegram_bot_token)
 
 
 # Singleton — import this across the app

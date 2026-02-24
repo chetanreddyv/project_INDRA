@@ -456,15 +456,30 @@ personal-assistant/
 git clone https://github.com/your-username/Personal_Assistant.git
 cd Personal_Assistant
 
-# 2. Create and configure environment
-cp .env.example .env
-# Edit .env with your TELEGRAM_BOT_TOKEN, GOOGLE_API_KEY, and ALLOWED_CHAT_IDS
-
-# 3. Install dependencies
+# 2. Install dependencies
 uv sync
 
+# 3. Run the setup wizard (recommended for first-time setup)
+uv run python onboarding.py
+```
+
+The setup wizard opens a **localhost web UI** that walks you through every configuration step — obtaining API keys, connecting Telegram, and validating everything works. No manual `.env` editing needed.
+
+> **Headless / SSH?** Use CLI mode: `uv run python onboarding.py --cli`
+
+<details>
+<summary><strong>Manual setup (advanced)</strong></summary>
+
+```bash
+# Copy and edit the env template
+cp .env.example .env
+# Edit .env with your TELEGRAM_BOT_TOKEN, GOOGLE_API_KEY, and ALLOWED_CHAT_IDS
+```
+</details>
+
+```bash
 # 4. Run the assistant
-uv run uvicorn app:app --host 0.0.0.0 --port 8000
+uv run python app.py
 ```
 
 ### Verify
@@ -537,3 +552,7 @@ MIT
 <p align="center">
   Built with ⚡ by <a href="https://github.com/chetanv-code">Chetan Valluru</a>
 </p>
+
+
+to be added in readme.md
+- secure tool execution approval, human-in-the-loop approval for write actions by stripping away llms the power of deciding whether human approval is required or not. and literally write actions only execute after human approval due to deterministic nature of the code.

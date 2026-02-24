@@ -45,6 +45,23 @@ async def lifespan(app: FastAPI):
 
     logger.info("🚀 Starting Personal Assistant...")
 
+    # ── Onboarding check ─────────────────────────────────────
+    if settings.needs_onboarding:
+        logger.warning("")
+        logger.warning("═" * 56)
+        logger.warning("  ⚠️  INDRA is not configured yet!")
+        logger.warning("")
+        logger.warning("  Run the setup wizard:")
+        logger.warning("    uv run python onboarding.py")
+        logger.warning("")
+        logger.warning("  Or use CLI mode:")
+        logger.warning("    uv run python onboarding.py --cli")
+        logger.warning("═" * 56)
+        logger.warning("")
+        # Yield to keep FastAPI alive but don't initialize anything
+        yield
+        return
+
     # Initialize Telegram client
     telegram_client = TelegramClient(settings.telegram_bot_token)
     logger.info("✅ Telegram client initialized")
