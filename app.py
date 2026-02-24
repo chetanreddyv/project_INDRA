@@ -96,6 +96,13 @@ async def lifespan(app: FastAPI):
         logger.info("🔴 Shutting down...")
         polling_task.cancel()
         await telegram_client.close()
+        try:
+            from memory import memorygate
+            await memorygate.store.close()
+            logger.info("✅ Zvec memory stores flushed and closed")
+        except Exception as e:
+            logger.error(f"❌ Error closing memory stores: {e}")
+            
     # SQLite connection is closed automatically when the async with block exits
     logger.info("✅ SQLite checkpointer closed")
 
@@ -399,6 +406,8 @@ async def _run_memorygate(thread_id: str, user_input: str, agent_response: str):
     try:
         from memory import memorygate
         await memorygate.process(thread_id, user_input, agent_response)
+        # Background sync Zvec vector index AFTER SQLite writes are done
+        await memorygate.store.sync_pending_memories()
     except Exception as e:
         logger.error(f"Memorygate error: {e}", exc_info=True)
 

@@ -37,10 +37,10 @@ MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 # ==========================================================
 
 class ExtractedMemory(BaseModel):
-    preferences: List[str] = Field(default_factory=list, description="Writing style, tone, format rules.")
-    facts: List[str] = Field(default_factory=list, description="Hard facts: names, roles, constraints, locations.")
-    corrections: List[str] = Field(default_factory=list, description="Explicit rules where user corrected the AI.")
-    obsolete_items: List[str] = Field(default_factory=list, description="Existing memories that are no longer true.")
+    preferences: List[str] = Field(default_factory=list, description="Writing style, tone, format rules. These are 'pref' kind.")
+    facts: List[str] = Field(default_factory=list, description="Hard facts: names, roles, constraints, locations. These are 'fact' kind.")
+    corrections: List[str] = Field(default_factory=list, description="Explicit rules where user corrected the AI. These are 'rule' kind.")
+    obsolete_items: List[str] = Field(default_factory=list, description="Existing memories that are no longer true — will be tombstoned.")
     important: bool = Field(default=False, description="True ONLY if new, actionable information was discovered.")
 
 
@@ -88,7 +88,7 @@ class DatabaseClient:
         return conn
 
     def initialize(self):
-        """Create tables if they don't exist."""
+        """Create tables if they don't exist. Runs migrations safely."""
         with self.get_fast_connection() as conn:
             # Table for chat history
             conn.execute("""
@@ -102,7 +102,7 @@ class DatabaseClient:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_thread_id ON thread_history(thread_id)")
 
-            # Table for explicit memories (Zvec document store text)
+            # ── Legacy table (kept for migration) ──
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS memory_docs (
                     doc_id TEXT PRIMARY KEY,
@@ -110,7 +110,51 @@ class DatabaseClient:
                     created_at TEXT NOT NULL
                 )
             """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_content ON memory_docs(content)")
+
+            # ── Rich memory_items table (Phase 2) ──
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS memory_items (
+                    id TEXT PRIMARY KEY,
+                    kind TEXT CHECK(kind IN ('pref','fact','rule')) NOT NULL,
+                    text TEXT NOT NULL,
+                    created_ts TEXT NOT NULL,
+                    updated_ts TEXT NOT NULL,
+                    confidence REAL DEFAULT 1.0,
+                    source_thread_id TEXT,
+                    status TEXT CHECK(status IN ('active','tombstoned')) DEFAULT 'active',
+                    supersedes_id TEXT,
+                    indexed INTEGER DEFAULT 0
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_mi_status ON memory_items(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_mi_pending ON memory_items(indexed) WHERE indexed = 0")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_mi_kind ON memory_items(kind)")
+
+            # ── FTS5 virtual table for BM25 keyword search ──
+            conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+                    text, kind,
+                    content='memory_items',
+                    content_rowid='rowid'
+                )
+            """)
+
+            # ── Auto-migrate legacy memory_docs → memory_items ──
+            cursor = conn.execute("SELECT COUNT(*) FROM memory_docs")
+            legacy_count = cursor.fetchone()[0]
+            if legacy_count > 0:
+                logger.info(f"🔄 Migrating {legacy_count} legacy memory_docs → memory_items...")
+                now = datetime.now(timezone.utc).isoformat()
+                conn.execute("""
+                    INSERT OR IGNORE INTO memory_items (id, kind, text, created_ts, updated_ts, indexed)
+                    SELECT doc_id, 'fact', content, created_at, ?, 0
+                    FROM memory_docs
+                """, (now,))
+                # Clear legacy table after migration
+                conn.execute("DELETE FROM memory_docs")
+                logger.info("✅ Migration complete — legacy memory_docs cleared")
+
+    # ── History methods ────────────────────────────────────────
 
     async def add_history(self, thread_id: str, role: str, content: str):
         async with self._lock:
@@ -134,62 +178,116 @@ class DatabaseClient:
                 return list(reversed(rows))
         return await asyncio.to_thread(_fetch)
 
-    async def get_doc_by_content(self, content: str) -> str | None:
+    # ── Memory item methods (Phase 2) ─────────────────────────
+
+    async def item_exists_by_text(self, text: str) -> str | None:
+        """Check if an active memory item with this exact text exists."""
         def _fetch():
             with self.get_fast_connection() as conn:
-                cursor = conn.execute("SELECT doc_id FROM memory_docs WHERE content = ?", (content,))
+                cursor = conn.execute(
+                    "SELECT id FROM memory_items WHERE text = ? AND status = 'active'",
+                    (text,)
+                )
                 row = cursor.fetchone()
                 return row[0] if row else None
         return await asyncio.to_thread(_fetch)
 
-    async def get_docs_by_ids(self, doc_ids: List[str]) -> List[str]:
-        if not doc_ids:
+    async def get_active_items_by_ids(self, item_ids: List[str]) -> List[Dict]:
+        """Retrieve active memory items by their IDs."""
+        if not item_ids:
             return []
-        
         def _fetch():
             with self.get_fast_connection() as conn:
-                placeholders = ",".join("?" * len(doc_ids))
-                cursor = conn.execute(f"SELECT content FROM memory_docs WHERE doc_id IN ({placeholders})", doc_ids)
-                return [row[0] for row in cursor.fetchall()]
+                conn.row_factory = sqlite3.Row
+                placeholders = ",".join("?" * len(item_ids))
+                cursor = conn.execute(
+                    f"SELECT id, kind, text FROM memory_items WHERE id IN ({placeholders}) AND status = 'active'",
+                    item_ids
+                )
+                return [dict(r) for r in cursor.fetchall()]
         return await asyncio.to_thread(_fetch)
 
-    async def remove_docs_by_content(self, contents: List[str]) -> List[str]:
-        """Returns the doc_ids of the deleted documents."""
+    async def tombstone_by_content(self, contents: List[str]):
+        """Tombstone (soft-delete) memory items matching content."""
         if not contents:
-            return []
-        removed_ids = []
-        async with self._lock:
-            def _delete():
-                with self.get_fast_connection() as conn:
-                    placeholders = ",".join("?" * len(contents))
-                    # First fetch the IDs before deleting so we can return them for Zvec
-                    cursor = conn.execute(f"SELECT doc_id FROM memory_docs WHERE content IN ({placeholders})", contents)
-                    ids = [row[0] for row in cursor.fetchall()]
-                    if ids:
-                        conn.execute(f"DELETE FROM memory_docs WHERE doc_id IN ({','.join('?' * len(ids))})", ids)
-                    return ids
-            removed_ids = await asyncio.to_thread(_delete)
-        return removed_ids
-
-    async def insert_docs(self, docs: List[Dict[str, str]]):
-        if not docs:
             return
         async with self._lock:
-            def _insert():
+            def _tombstone():
+                now = datetime.now(timezone.utc).isoformat()
                 with self.get_fast_connection() as conn:
-                    values = [
-                        (doc["doc_id"], doc["content"], datetime.now(timezone.utc).isoformat())
-                        for doc in docs
-                    ]
-                    conn.executemany(
-                        "INSERT OR IGNORE INTO memory_docs (doc_id, content, created_at) VALUES (?, ?, ?)",
-                        values
+                    for content in contents:
+                        conn.execute(
+                            "UPDATE memory_items SET status = 'tombstoned', updated_ts = ? WHERE text = ? AND status = 'active'",
+                            (now, content)
+                        )
+            await asyncio.to_thread(_tombstone)
+
+    async def insert_memory_item(self, item_id: str, kind: str, text: str, source_thread_id: str = None):
+        """Insert a new memory item and sync FTS."""
+        async with self._lock:
+            def _insert():
+                now = datetime.now(timezone.utc).isoformat()
+                with self.get_fast_connection() as conn:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO memory_items (id, kind, text, created_ts, updated_ts, source_thread_id, indexed) VALUES (?, ?, ?, ?, ?, ?, 0)",
+                        (item_id, kind, text, now, now, source_thread_id)
+                    )
+                    # Sync FTS index
+                    conn.execute(
+                        "INSERT INTO memory_fts (rowid, text, kind) SELECT rowid, text, kind FROM memory_items WHERE id = ?",
+                        (item_id,)
                     )
             await asyncio.to_thread(_insert)
+
+    async def search_fts(self, query: str, limit: int = 20) -> List[Dict]:
+        """BM25 keyword search over memory_items via FTS5."""
+        def _search():
+            with self.get_fast_connection() as conn:
+                conn.row_factory = sqlite3.Row
+                # FTS5 MATCH query with BM25 ranking
+                cursor = conn.execute("""
+                    SELECT mi.id, mi.kind, mi.text, rank
+                    FROM memory_fts fts
+                    JOIN memory_items mi ON mi.rowid = fts.rowid
+                    WHERE memory_fts MATCH ?
+                    AND mi.status = 'active'
+                    ORDER BY rank
+                    LIMIT ?
+                """, (query, limit))
+                return [dict(r) for r in cursor.fetchall()]
+        try:
+            return await asyncio.to_thread(_search)
+        except Exception as e:
+            logger.debug(f"FTS search failed (likely empty or bad query): {e}")
+            return []
+
+    async def fetch_pending_items(self, batch_size: int = 256) -> List[Dict]:
+        """Fetch memory items not yet indexed in Zvec."""
+        def _fetch():
+            with self.get_fast_connection() as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT id, text FROM memory_items WHERE indexed = 0 AND status = 'active' LIMIT ?",
+                    (batch_size,)
+                ).fetchall()
+                return [dict(r) for r in rows]
+        return await asyncio.to_thread(_fetch)
+
+    async def mark_items_indexed(self, item_ids: List[str]):
+        """Mark memory items as indexed in Zvec."""
+        if not item_ids:
+            return
+        def _mark():
+            with self.get_fast_connection() as conn:
+                placeholders = ",".join("?" * len(item_ids))
+                conn.execute(f"UPDATE memory_items SET indexed = 1 WHERE id IN ({placeholders})", item_ids)
+        await asyncio.to_thread(_mark)
 
 
 from fastembed import TextEmbedding
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+
+HEALTH_ID = "__health_check__"
 
 # ==========================================================
 # 3. Zvec Vector Store
@@ -202,11 +300,13 @@ class ZvecMemoryStore:
         self.db = db_client
         self.collection = None
         self._needs_rebuild = False  # set True when corruption forces a fresh index
+        self._zvec_write_lock = asyncio.Lock()
 
         # FastEmbed Client (Lightweight local BGE model by default)
         self.embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
         # bge-small-en-v1.5 embedding dimension is 384
         self.dim = 384
+        self.health_vector = [1.0] + [0.0] * (self.dim - 1)
 
         self.skill_collection = None
 
@@ -216,6 +316,23 @@ class ZvecMemoryStore:
         logger.warning(f"⚠️  Corrupt Zvec index at {path} — wiping and recreating...")
         shutil.rmtree(path, ignore_errors=True)
         return zvec.create_and_open(path=path, schema=schema)
+
+    def _ensure_health_doc(self, coll: zvec.Collection):
+        got = coll.fetch(HEALTH_ID)
+        if HEALTH_ID in got:
+            return
+        coll.upsert([zvec.Doc(id=HEALTH_ID, vectors={"embedding": self.health_vector})])
+        coll.flush()
+
+    def _probe_integrity(self, coll: zvec.Collection) -> bool:
+        try:
+            got = coll.fetch(HEALTH_ID)
+            if HEALTH_ID not in got:
+                return False
+            res = coll.query(vectors=zvec.VectorQuery("embedding", vector=self.health_vector), topk=1)
+            return bool(res) and res[0].id == HEALTH_ID
+        except Exception:
+            return False
 
     def initialize(self):
         """Must be called on startup to open the Zvec indexes."""
@@ -227,13 +344,13 @@ class ZvecMemoryStore:
         # --- Memory index ---
         try:
             self.collection = zvec.open(path=ZVEC_PATH)
-            # Probe the collection with a dummy query to expose silent corruption
-            self.collection.query(
-                zvec.VectorQuery("embedding", vector=[0.0] * self.dim), topk=1
-            )
+            self._ensure_health_doc(self.collection)
+            if not self._probe_integrity(self.collection):
+                raise RuntimeError("Memory Zvec integrity probe failed")
         except Exception as e:
             logger.warning(f"⚠️  zvec_index open/probe failed ({e}), rebuilding from SQLite...")
             self.collection = self._wipe_and_recreate(ZVEC_PATH, mem_schema)
+            self._ensure_health_doc(self.collection)
             self._needs_rebuild = True  # will re-embed from SQLite after init
 
         # --- Skill index ---
@@ -243,9 +360,13 @@ class ZvecMemoryStore:
         )
         try:
             self.skill_collection = zvec.open(path=ZVEC_SKILLS_PATH)
+            self._ensure_health_doc(self.skill_collection)
+            if not self._probe_integrity(self.skill_collection):
+                raise RuntimeError("Skill Zvec integrity probe failed")
         except Exception as e:
             logger.warning(f"⚠️  zvec_skills open failed ({e}), recreating...")
             self.skill_collection = self._wipe_and_recreate(ZVEC_SKILLS_PATH, skill_schema)
+            self._ensure_health_doc(self.skill_collection)
 
     async def _embed(self, texts: List[str]) -> List[List[float]]:
         """Generate local vector embeddings using FastEmbed."""
@@ -264,34 +385,47 @@ class ZvecMemoryStore:
         return await asyncio.to_thread(_get_embeddings)
 
     async def get_relevant_context(self, query: str, top_k: int = 5) -> str:
-        """Search Zvec for memories semantically similar to the current query."""
+        """Hybrid retrieval: Zvec vector search + FTS5 BM25, merged and deduped."""
         if not self.collection:
             return ""
             
         vector = (await self._embed([query]))[0]
         
+        # 1. Vector search (Zvec)
+        zvec_ids = []
         try:
             results = self.collection.query(
                 zvec.VectorQuery("embedding", vector=vector),
-                topk=top_k
+                topk=top_k * 2
             )
-            
-            # Extract doc_ids from Zvec results (results are `Doc` objects which likely have an `.id` property)
-            doc_ids = [res.id for res in results]
-            
-            if not doc_ids:
-                return ""
-                
-            # Retrieve actual text from SQLite
-            relevant_texts = await self.db.get_docs_by_ids(doc_ids)
-            return "\n".join(f"- {text}" for text in relevant_texts)
-            
+            zvec_ids = [res.id for res in results if res.id != HEALTH_ID]
         except Exception as e:
             logger.error(f"Zvec query failed: {e}")
+        
+        # 2. BM25 keyword search (FTS5)
+        fts_results = await self.db.search_fts(query, limit=top_k * 2)
+        fts_ids = [r["id"] for r in fts_results]
+        
+        # 3. Merge + deduplicate (vector results first, then BM25-only)
+        seen = set()
+        merged_ids = []
+        for item_id in zvec_ids + fts_ids:
+            if item_id not in seen:
+                seen.add(item_id)
+                merged_ids.append(item_id)
+        merged_ids = merged_ids[:top_k]
+        
+        if not merged_ids:
             return ""
+            
+        # 4. Retrieve active items from SQLite
+        items = await self.db.get_active_items_by_ids(merged_ids)
+        if not items:
+            return ""
+        return "\n".join(f"- [{item['kind']}] {item['text']}" for item in items)
 
-    async def get_relevant_skills(self, query: str, top_k: int = 2) -> str:
-        """Search Zvec for skills most relevant to the query to prevent prompt drift."""
+    async def get_relevant_skills(self, query: str, top_k: int = 2, threshold: float = 0.35) -> str:
+        """Search Zvec for skills relevant to the query. Only returns skills above score threshold."""
         if not self.skill_collection:
             return ""
             
@@ -300,21 +434,26 @@ class ZvecMemoryStore:
         try:
             results = self.skill_collection.query(
                 zvec.VectorQuery("embedding", vector=vector),
-                topk=top_k * 2 # get more chunks initially to find unique skills
+                topk=top_k * 2  # get more chunks initially to find unique skills
             )
             
-            # The .id here is "skill_name::chunk_index"
-            # We want unique skill names
+            # Filter by threshold + deduplicate to unique skill names
             skill_names = []
             for res in results:
+                if res.id == HEALTH_ID:
+                    continue
+                if res.score < threshold:
+                    logger.debug(f"  -> Skill chunk {res.id} below threshold ({res.score:.3f} < {threshold})")
+                    continue
                 skill_id = res.id.rsplit("_", 1)[0]
                 if skill_id not in skill_names:
                     skill_names.append(skill_id)
+                    logger.debug(f"  -> Skill match: {skill_id} (score={res.score:.3f})")
             
-            # We only care about the top_k unique skills
             skill_names = skill_names[:top_k]
             
             if not skill_names:
+                logger.info("  -> No skills above threshold — using general fallback")
                 return "You are a helpful personal assistant. Be concise and accurate."
                 
             prompts = []
@@ -334,87 +473,106 @@ class ZvecMemoryStore:
             logger.error(f"Zvec skills query failed: {e}")
             return "You are a helpful personal assistant. Be concise and accurate."
 
-    async def apply_updates(self, memory: ExtractedMemory):
-        """Safely sync SQLite and Zvec."""
+    async def apply_updates(self, memory: ExtractedMemory, source_thread_id: str = None):
+        """Write to SQLite memory_items only. Zvec is synced deferred."""
         
-        # 1. Obsolete Items
+        # 1. Tombstone obsolete items (soft delete)
         if memory.obsolete_items:
-            # Zvec currently operates strictly append-only or whole-collection in early versions, 
-            # but if delete is supported, ideally we do it here. 
-            # Given that we use SQLite as the text source of truth, removing it from
-            # the SQLite DB is safe enough; Zvec will return a dangling ID, 
-            # which SQLite get_docs_by_ids() handles safely by ignoring.
-            await self.db.remove_docs_by_content(memory.obsolete_items)
+            await self.db.tombstone_by_content(memory.obsolete_items)
+            logger.info(f"  -> Tombstoned {len(memory.obsolete_items)} obsolete memories")
 
-        # 2. Ingest New Items
-        new_items = memory.preferences + memory.facts + memory.corrections
-        if new_items:
-            # Dedup slightly via SQLite first
-            to_insert = []
-            for item in new_items:
-                existing_id = await self.db.get_doc_by_content(item)
-                if not existing_id:
-                    to_insert.append(item)
-                    
-            if not to_insert:
+        # 2. Ingest new items with kind classification
+        kind_map = [
+            (memory.preferences, 'pref'),
+            (memory.facts, 'fact'),
+            (memory.corrections, 'rule'),
+        ]
+        
+        inserted = 0
+        for items, kind in kind_map:
+            for text in items:
+                existing = await self.db.item_exists_by_text(text)
+                if not existing:
+                    item_id = f"mem_{uuid.uuid4().hex[:12]}"
+                    await self.db.insert_memory_item(item_id, kind, text, source_thread_id)
+                    inserted += 1
+        
+        if inserted:
+            logger.info(f"  -> Inserted {inserted} new memory items into SQLite")
+
+    async def sync_pending_memories(self, batch_size: int = 256):
+        """Batch embed and sync memory_items -> Zvec in one fast locked operation."""
+        if not self.collection:
+            return
+
+        pending = await self.db.fetch_pending_items(batch_size)
+        if not pending:
+            return
+
+        texts = [r["text"] for r in pending]
+        ids = [r["id"] for r in pending]
+        
+        # Embed outside the lock (expensive)
+        vectors = await self._embed(texts)
+        if not vectors:
+            return
+
+        docs = [zvec.Doc(id=i, vectors={"embedding": v}) for i, v in zip(ids, vectors)]
+
+        # Single locked write batch into Zvec + flush
+        async with self._zvec_write_lock:
+            try:
+                self._ensure_health_doc(self.collection)
+                self.collection.upsert(docs)
+                self.collection.flush()
+            except Exception as e:
+                logger.error(f"Zvec deferred sync failed: {e}")
                 return
-                
-            embeddings = await self._embed(to_insert)
-            
-            docs_to_db = []
-            docs_to_zvec = []
-            
-            for text, vector in zip(to_insert, embeddings):
-                doc_id = f"mem_{uuid.uuid4().hex[:12]}"
-                docs_to_db.append({"doc_id": doc_id, "content": text})
-                docs_to_zvec.append(zvec.Doc(id=doc_id, vectors={"embedding": vector}))
-            
-            # Commit to SQLite
-            await self.db.insert_docs(docs_to_db)
-            
-            # Insert into Zvec collection
-            if self.collection:
-                try:
-                    self.collection.insert(docs_to_zvec)
-                except Exception as e:
-                    logger.error(f"Zvec insert failed: {e}")
+
+        # Mark as indexed in SQLite (after Zvec flush succeeds)
+        await self.db.mark_items_indexed(ids)
+        logger.info(f"✅ Synced {len(ids)} new memories into Zvec index")
 
     async def rebuild_from_sqlite(self):
         """
-        Re-populate zvec_index from the durable SQLite memory_docs table.
+        Re-populate zvec_index from the durable memory_items table.
 
         Called after corruption forces a fresh index so no user memory is lost.
         The text lives in SQLite; we just need to re-embed it.
         """
-        logger.info("🔄 Rebuilding zvec_index from SQLite memory_docs...")
+        logger.info("🔄 Rebuilding zvec_index from SQLite memory_items...")
 
         def _fetch_all():
             with self.db.get_fast_connection() as conn:
-                cursor = conn.execute("SELECT doc_id, content FROM memory_docs")
+                cursor = conn.execute("SELECT id, text FROM memory_items WHERE status = 'active'")
                 return cursor.fetchall()
 
         rows = await asyncio.to_thread(_fetch_all)
 
         if not rows:
-            logger.info("  -> No existing memory_docs found — fresh start.")
+            logger.info("  -> No active memory_items found — fresh start.")
             self._needs_rebuild = False
             return
 
-        doc_ids = [r[0] for r in rows]
-        texts   = [r[1] for r in rows]
+        item_ids = [r[0] for r in rows]
+        texts    = [r[1] for r in rows]
 
         embeddings = await self._embed(texts)
         docs_to_zvec = [
-            zvec.Doc(id=doc_id, vectors={"embedding": vector})
-            for doc_id, vector in zip(doc_ids, embeddings)
+            zvec.Doc(id=item_id, vectors={"embedding": vector})
+            for item_id, vector in zip(item_ids, embeddings)
         ]
 
         try:
-            self.collection.insert(docs_to_zvec)
-            logger.info(f"✅ Rebuilt zvec_index with {len(docs_to_zvec)} memory docs from SQLite")
+            async with self._zvec_write_lock:
+                self.collection.upsert(docs_to_zvec)
+                self.collection.flush()
+            logger.info(f"✅ Rebuilt zvec_index with {len(docs_to_zvec)} memory items from SQLite")
         except Exception as e:
             logger.error(f"Zvec rebuild insert failed: {e}")
 
+        # Mark all as indexed
+        await self.db.mark_items_indexed(item_ids)
         self._needs_rebuild = False
 
     async def initialize_skills(self):
@@ -459,12 +617,30 @@ class ZvecMemoryStore:
             docs_to_zvec.append(zvec.Doc(id=s_id, vectors={"embedding": vector}))
 
         try:
-            # We rewrite the collection on startup just in case the config changed
-            self.skill_collection.insert(docs_to_zvec)
+            async with self._zvec_write_lock:
+                self.skill_collection.upsert(docs_to_zvec)
+                self.skill_collection.flush()
             logger.info(f"✅ Embedded {len(docs_to_zvec)} skills into dynamic Zvec memory")
         except Exception as e:
             logger.error(f"Zvec skills insert failed: {e}")
 
+    async def close(self):
+        """Gracefully flush and close Zvec collections on shutdown."""
+        if self.collection:
+            try:
+                self.collection.flush()
+            except Exception as e:
+                logger.error(f"Error flushing memory index: {e}")
+            finally:
+                self.collection = None
+                
+        if self.skill_collection:
+            try:
+                self.skill_collection.flush()
+            except Exception as e:
+                logger.error(f"Error flushing skill index: {e}")
+            finally:
+                self.skill_collection = None
 
 # ==========================================================
 # 4. MemoryGate Interface
@@ -490,23 +666,27 @@ class MemoryGate:
         """Background extraction triggered after a turn."""
         logger.info(f"--- [MemoryGate: Processing Thread {thread_id}] ---")
         
-        # 1. Fast Wallet-Optimized History Write
+        # 1. Fast History Write
         await self.db.add_history(thread_id, "user", user_input)
         await self.db.add_history(thread_id, "assistant", agent_response)
 
         conversation = f"User: {user_input}\nAssistant: {agent_response}"
         
-        # 2. Fetch specific semantic memories related to this turn
+        # 2. Fetch relevant memories (hybrid: vector + BM25) for dedup context
         relevant_context = await self.store.get_relevant_context(conversation, top_k=10)
 
-        # 3. Extract structured memories (passing current subset memory as context)
+        # 3. Extract structured memories (passing current memories as context)
         try:
             result = await memory_agent.run(conversation, deps=relevant_context)
             memory: ExtractedMemory = result.output
 
             if memory.important:
-                await self.store.apply_updates(memory)
-                logger.info(f" -> Memory updated: +{len(memory.preferences)}P +{len(memory.facts)}F -{len(memory.obsolete_items)} Obs")
+                await self.store.apply_updates(memory, source_thread_id=thread_id)
+                logger.info(
+                    f" -> Memory updated: +{len(memory.preferences)}P "
+                    f"+{len(memory.facts)}F +{len(memory.corrections)}R "
+                    f"-{len(memory.obsolete_items)} tombstoned"
+                )
             else:
                 logger.info(" -> No notable memory from this turn")
 
@@ -521,7 +701,7 @@ class MemoryGate:
         parts = []
         if recent_rows:
             history_str = "\n".join(f"- **{row['role'].title()}**: {row['content']}" for row in recent_rows)
-            # 2. Grab semantic context based on the user's latest message (or whole recent history)
+            # 2. Hybrid semantic+BM25 context based on user's latest message
             latest_user = next((row['content'] for row in reversed(recent_rows) if row['role'] == 'user'), "")
             
             semantic_context = ""
