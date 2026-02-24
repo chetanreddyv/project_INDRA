@@ -201,36 +201,51 @@ class ZvecMemoryStore:
     def __init__(self, db_client: DatabaseClient):
         self.db = db_client
         self.collection = None
-        
+        self._needs_rebuild = False  # set True when corruption forces a fresh index
+
         # FastEmbed Client (Lightweight local BGE model by default)
         self.embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
         # bge-small-en-v1.5 embedding dimension is 384
         self.dim = 384
-        
+
         self.skill_collection = None
-        
+
+    def _wipe_and_recreate(self, path: str, schema: zvec.CollectionSchema):
+        """Delete a corrupt Zvec directory and return a fresh collection."""
+        import shutil
+        logger.warning(f"⚠️  Corrupt Zvec index at {path} — wiping and recreating...")
+        shutil.rmtree(path, ignore_errors=True)
+        return zvec.create_and_open(path=path, schema=schema)
+
     def initialize(self):
         """Must be called on startup to open the Zvec indexes."""
-        schema = zvec.CollectionSchema(
+        mem_schema = zvec.CollectionSchema(
             name="agent_memory",
             vectors=zvec.VectorSchema("embedding", zvec.DataType.VECTOR_FP32, self.dim),
         )
-        
-        # If the index already exists, open it. Otherwise create it.
+
+        # --- Memory index ---
         try:
             self.collection = zvec.open(path=ZVEC_PATH)
-        except Exception:
-            self.collection = zvec.create_and_open(path=ZVEC_PATH, schema=schema)
-            
-        # 2. Skill Store
+            # Probe the collection with a dummy query to expose silent corruption
+            self.collection.query(
+                zvec.VectorQuery("embedding", vector=[0.0] * self.dim), topk=1
+            )
+        except Exception as e:
+            logger.warning(f"⚠️  zvec_index open/probe failed ({e}), rebuilding from SQLite...")
+            self.collection = self._wipe_and_recreate(ZVEC_PATH, mem_schema)
+            self._needs_rebuild = True  # will re-embed from SQLite after init
+
+        # --- Skill index ---
         skill_schema = zvec.CollectionSchema(
             name="skill_memory",
             vectors=zvec.VectorSchema("embedding", zvec.DataType.VECTOR_FP32, self.dim),
         )
         try:
             self.skill_collection = zvec.open(path=ZVEC_SKILLS_PATH)
-        except Exception:
-            self.skill_collection = zvec.create_and_open(path=ZVEC_SKILLS_PATH, schema=skill_schema)
+        except Exception as e:
+            logger.warning(f"⚠️  zvec_skills open failed ({e}), recreating...")
+            self.skill_collection = self._wipe_and_recreate(ZVEC_SKILLS_PATH, skill_schema)
 
     async def _embed(self, texts: List[str]) -> List[List[float]]:
         """Generate local vector embeddings using FastEmbed."""
@@ -364,14 +379,52 @@ class ZvecMemoryStore:
                 except Exception as e:
                     logger.error(f"Zvec insert failed: {e}")
 
+    async def rebuild_from_sqlite(self):
+        """
+        Re-populate zvec_index from the durable SQLite memory_docs table.
+
+        Called after corruption forces a fresh index so no user memory is lost.
+        The text lives in SQLite; we just need to re-embed it.
+        """
+        logger.info("🔄 Rebuilding zvec_index from SQLite memory_docs...")
+
+        def _fetch_all():
+            with self.db.get_fast_connection() as conn:
+                cursor = conn.execute("SELECT doc_id, content FROM memory_docs")
+                return cursor.fetchall()
+
+        rows = await asyncio.to_thread(_fetch_all)
+
+        if not rows:
+            logger.info("  -> No existing memory_docs found — fresh start.")
+            self._needs_rebuild = False
+            return
+
+        doc_ids = [r[0] for r in rows]
+        texts   = [r[1] for r in rows]
+
+        embeddings = await self._embed(texts)
+        docs_to_zvec = [
+            zvec.Doc(id=doc_id, vectors={"embedding": vector})
+            for doc_id, vector in zip(doc_ids, embeddings)
+        ]
+
+        try:
+            self.collection.insert(docs_to_zvec)
+            logger.info(f"✅ Rebuilt zvec_index with {len(docs_to_zvec)} memory docs from SQLite")
+        except Exception as e:
+            logger.error(f"Zvec rebuild insert failed: {e}")
+
+        self._needs_rebuild = False
+
     async def initialize_skills(self):
         """Called on startup to embed skills/*.md so Zvec can retrieve them."""
         if not SKILLS_DIR.exists() or not self.skill_collection:
             return
-            
+
         skills_to_embed = []
         skill_ids = []
-        
+
         # Splitters
         headers_to_split_on = [
             ("#", "Header 1"),
@@ -380,34 +433,33 @@ class ZvecMemoryStore:
         ]
         markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
-        
+
         # Load all .md files
         for skill_file in SKILLS_DIR.glob("*.md"):
             skill_id = skill_file.stem  # e.g. "google_workspace"
             content = skill_file.read_text()
-            
+
             # 1. Split by header
             md_docs = markdown_splitter.split_text(content)
-            
+
             # 2. Split large chunks recursively
             final_chunks = text_splitter.split_documents(md_docs)
-            
+
             for i, chunk in enumerate(final_chunks):
                 skills_to_embed.append(chunk.page_content)
                 skill_ids.append(f"{skill_id}_{i}")
-            
+
         if not skills_to_embed:
             return
-            
+
         embeddings = await self._embed(skills_to_embed)
-        
+
         docs_to_zvec = []
         for s_id, vector in zip(skill_ids, embeddings):
             docs_to_zvec.append(zvec.Doc(id=s_id, vectors={"embedding": vector}))
-            
+
         try:
             # We rewrite the collection on startup just in case the config changed
-            # (assuming Zvec supports upsert, otherwise we just insert)
             self.skill_collection.insert(docs_to_zvec)
             logger.info(f"✅ Embedded {len(docs_to_zvec)} skills into dynamic Zvec memory")
         except Exception as e:
@@ -429,6 +481,9 @@ class MemoryGate:
         """Must be called at application startup."""
         self.db.initialize()
         self.store.initialize()
+        # If corruption was detected, rebuild the vector index from durable SQLite
+        if self.store._needs_rebuild:
+            await self.store.rebuild_from_sqlite()
         await self.store.initialize_skills()
 
     async def process(self, thread_id: str, user_input: str, agent_response: str):
