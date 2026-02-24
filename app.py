@@ -252,12 +252,21 @@ async def _run_graph(chat_id: int, user_input: str):
         state = await graph.aget_state(config)
 
         if state.next:
-            # Graph is paused (interrupt) — send approval buttons
+            # Graph is paused (interrupt) — send approval buttons.
+            # The payload was built by the Python write-action gate, so
+            # tool_args are the *exact* arguments the LLM wanted to pass.
             interrupted = state.tasks[0].interrupts[0].value
+            tool_args = interrupted.get("tool_args", {})
+            args_text = (
+                "\n".join(f"  • *{k}*: `{v}`" for k, v in tool_args.items())
+                if tool_args
+                else ""
+            )
             action_summary = (
                 f"*Action:* `{interrupted.get('action', 'unknown')}`\n"
                 f"*Skill:* `{interrupted.get('skill', 'unknown')}`\n\n"
                 f"{interrupted.get('details', '')}"
+                + (f"\n\n*Arguments:*\n{args_text}" if args_text else "")
             )
             await telegram_client.send_approval_buttons(
                 chat_id=chat_id,
