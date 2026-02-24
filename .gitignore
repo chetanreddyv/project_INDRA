@@ -23,3 +23,6 @@ data/
 
 # OS files
 .DS_Store
+
+# Google OAuth tokens
+credentials.json

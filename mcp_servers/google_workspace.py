@@ -1,40 +1,69 @@
-from fastmcp import FastMCP
-from dotenv import load_dotenv
+"""
+mcp_servers/google_workspace.py — Gmail + Calendar tools.
+
+All tools are plain Python functions that can be called programmatically.
+The FastMCP decorator is kept for optional MCP-protocol serving, but
+the primary usage is direct import + call from the approval node.
+
+Tool registry
+─────────────
+    TOOL_REGISTRY: dict[str, callable]
+
+    Maps tool names (e.g. "send_email") to their implementing functions.
+    Used by nodes/approval.py to dispatch approved write actions.
+"""
 
 import os
-import os.path
+import sys
+import json
+import uuid
 import base64
+import logging
+import datetime
 from email.mime.text import MIMEText
 from typing import List, Optional, Dict, Any, Tuple
-import sys
-import os.path as _osp
-sys.path.insert(0, _osp.dirname(_osp.dirname(_osp.abspath(__file__))))
+from pathlib import Path
+
+# Ensure project root is importable
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from dotenv import load_dotenv
+from fastmcp import FastMCP
 from google_auth_helper import get_google_creds
 from googleapiclient.discovery import build
 
-import logging
-
 load_dotenv()
 
-# Configure logging
+# ── Logging ──────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(name)s - %(message)s'
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
 )
-logger = logging.getLogger("gmail_server")
+logger = logging.getLogger("mcp.google_workspace")
 
-# Scopes are managed centrally in google_auth_helper.py
-
-mcp = FastMCP("Workspace Server")
-
-WATERMARK = "\n\n-By Cowork Agent"
+# ── FastMCP server instance (for optional MCP-protocol serving) ──
+mcp = FastMCP("Google Workspace")
 
 
-def get_gmail_service():
-    """Get authenticated Gmail service using shared credentials."""
+# ══════════════════════════════════════════════════════════════
+# Service builders
+# ══════════════════════════════════════════════════════════════
+
+def _get_gmail_service():
+    """Build an authenticated Gmail API client."""
     creds = get_google_creds()
-    return build("gmail", "v1", credentials=creds)
+    return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
+
+def _get_calendar_service():
+    """Build an authenticated Google Calendar API client."""
+    creds = get_google_creds()
+    return build("calendar", "v3", credentials=creds, cache_discovery=False)
+
+
+# ══════════════════════════════════════════════════════════════
+# Internal helpers
+# ══════════════════════════════════════════════════════════════
 
 def _b64url_decode(data: str) -> bytes:
     return base64.urlsafe_b64decode(data.encode("utf-8"))
@@ -53,30 +82,24 @@ def _find_header(headers: List[Dict[str, str]], name: str) -> str:
 
 
 def _extract_text_from_payload(payload: Dict[str, Any]) -> Tuple[str, str]:
-    """
-    Returns (text_plain, text_html) best-effort by walking MIME parts.
-    """
+    """Walk MIME parts and return (text_plain, text_html)."""
     text_plain = ""
     text_html = ""
 
     def walk(part: Dict[str, Any]):
         nonlocal text_plain, text_html
-
         mime_type = part.get("mimeType", "")
         body = part.get("body", {}) or {}
-
         data = body.get("data")
         if data:
             try:
                 decoded = _b64url_decode(data).decode("utf-8", errors="replace")
             except Exception:
                 decoded = ""
-
             if mime_type == "text/plain" and not text_plain:
                 text_plain = decoded
             elif mime_type == "text/html" and not text_html:
                 text_html = decoded
-
         for child in part.get("parts", []) or []:
             walk(child)
 
@@ -85,11 +108,7 @@ def _extract_text_from_payload(payload: Dict[str, Any]) -> Tuple[str, str]:
 
 
 def _resolve_label_id(service, label_id_or_name: str) -> str:
-    """
-    Accepts either a label ID (e.g., 'Label_123') or a label name (e.g., 'Work').
-    Returns a label ID if found, else raises.
-    """
-    # Quick path: common system labels
+    """Accept a label ID or display name; return the canonical ID."""
     system = {"INBOX", "UNREAD", "STARRED", "IMPORTANT", "SENT", "TRASH", "SPAM", "DRAFT"}
     if label_id_or_name in system:
         return label_id_or_name
@@ -102,16 +121,16 @@ def _resolve_label_id(service, label_id_or_name: str) -> str:
     raise ValueError(f"Label not found: {label_id_or_name}")
 
 
+# ══════════════════════════════════════════════════════════════
+# Gmail Tools
+# ══════════════════════════════════════════════════════════════
+
 @mcp.tool()
 def list_messages(max_results: int = 10, query: str = "", include_spam_trash: bool = False) -> str:
-    """
-    List messages. `query` uses the same search syntax as the Gmail search box (Gmail 'q'). [web:10][web:13]
-    Example query: "from:someone@example.com is:unread"
-    """
-    logger.info(f"🛠️ Tool Called: list_messages(max_results={max_results}, query='{query}')")
+    """List Gmail messages. `query` uses standard Gmail search syntax (e.g. 'from:someone@example.com is:unread')."""
+    logger.info(f"🛠️ list_messages(max_results={max_results}, query='{query}')")
     try:
-        service = get_gmail_service()
-
+        service = _get_gmail_service()
         resp = service.users().messages().list(
             userId="me",
             maxResults=max_results,
@@ -126,36 +145,31 @@ def list_messages(max_results: int = 10, query: str = "", include_spam_trash: bo
         lines = [f"Messages (showing up to {max_results}):"]
         for m in msgs:
             msg = service.users().messages().get(
-                userId="me",
-                id=m["id"],
-                format="metadata",
+                userId="me", id=m["id"], format="metadata",
                 metadataHeaders=["From", "To", "Subject", "Date"],
             ).execute()
-
             headers = (msg.get("payload", {}) or {}).get("headers", []) or []
             subject = _find_header(headers, "Subject")
             sender = _find_header(headers, "From")
             date = _find_header(headers, "Date")
             snippet = msg.get("snippet", "")
-
-            lines.append(f"- ID: {msg.get('id')} | {date} | {sender} | {subject}")
+            lines.append(f"- ID: {msg['id']} | {date} | {sender} | {subject}")
             if snippet:
                 lines.append(f"  Snippet: {snippet}")
 
-        logger.info(f"✅ Tool Complete: list_messages (Found {len(msgs)} messages)")
+        logger.info(f"✅ list_messages → {len(msgs)} results")
         return "\n".join(lines)
     except Exception as e:
-        logger.error(f"❌ Tool Error: list_messages - {str(e)}")
-        return f"Error listing messages: {str(e)}"
+        logger.error(f"❌ list_messages error: {e}")
+        return f"Error listing messages: {e}"
 
 
 @mcp.tool()
 def get_message(message_id: str) -> str:
-    """Fetch a message and return key headers + best-effort body extraction."""
-    logger.info(f"🛠️ Tool Called: get_message(message_id='{message_id}')")
+    """Fetch a single email by message ID and return headers + body."""
+    logger.info(f"🛠️ get_message(message_id='{message_id}')")
     try:
-        service = get_gmail_service()
-
+        service = _get_gmail_service()
         msg = service.users().messages().get(userId="me", id=message_id, format="full").execute()
         payload = msg.get("payload", {}) or {}
         headers = payload.get("headers", []) or []
@@ -164,26 +178,23 @@ def get_message(message_id: str) -> str:
         sender = _find_header(headers, "From")
         to = _find_header(headers, "To")
         date = _find_header(headers, "Date")
-
         text_plain, text_html = _extract_text_from_payload(payload)
 
-        out = []
-        out.append(f"Message ID: {msg.get('id')}")
-        out.append(f"Thread ID: {msg.get('threadId')}")
-        out.append(f"Date: {date}")
-        out.append(f"From: {sender}")
-        out.append(f"To: {to}")
-        out.append(f"Subject: {subject}")
-        out.append("\n--- BODY (text/plain) ---")
-        out.append(text_plain.strip() if text_plain else "[No text/plain body found]")
-        out.append("\n--- BODY (text/html) ---")
-        out.append(text_html.strip() if text_html else "[No text/html body found]")
-
-        logger.info(f"✅ Tool Complete: get_message")
+        out = [
+            f"Message ID: {msg['id']}",
+            f"Thread ID: {msg.get('threadId')}",
+            f"Date: {date}",
+            f"From: {sender}",
+            f"To: {to}",
+            f"Subject: {subject}",
+            "\n--- BODY ---",
+            text_plain.strip() if text_plain else (text_html.strip() if text_html else "[No body]"),
+        ]
+        logger.info("✅ get_message complete")
         return "\n".join(out)
     except Exception as e:
-        logger.error(f"❌ Tool Error: get_message - {str(e)}")
-        return f"Error getting message: {str(e)}"
+        logger.error(f"❌ get_message error: {e}")
+        return f"Error getting message: {e}"
 
 
 @mcp.tool()
@@ -193,16 +204,20 @@ def send_email(
     body: str,
     cc: str = "",
     bcc: str = "",
-    mime_subtype: str = "plain",  # "plain" or "html"
 ) -> str:
-    """
-    Send an email via Gmail API by base64url-encoding an RFC 2822 message in `raw`. [web:1]
-    """
-    logger.info(f"🛠️ Tool Called: send_email(to='{to}', subject='{subject}')")
-    try:
-        service = get_gmail_service()
+    """Send an email via Gmail.
 
-        msg = MIMEText(f"{body}{WATERMARK}", _subtype=mime_subtype, _charset="utf-8")
+    Args:
+        to: Recipient email address.
+        subject: Email subject line.
+        body: Email body text.
+        cc: Optional CC recipients (comma-separated).
+        bcc: Optional BCC recipients (comma-separated).
+    """
+    logger.info(f"🛠️ send_email(to='{to}', subject='{subject}')")
+    try:
+        service = _get_gmail_service()
+        msg = MIMEText(body, _subtype="plain", _charset="utf-8")
         msg["to"] = to
         msg["subject"] = subject
         if cc:
@@ -213,234 +228,223 @@ def send_email(
         raw = _b64url_encode(msg.as_bytes())
         sent = service.users().messages().send(userId="me", body={"raw": raw}).execute()
 
-        logger.info(f"✅ Tool Complete: send_email (ID: {sent.get('id')})")
-        return f"Email sent. Message ID: {sent.get('id')}"
+        logger.info(f"✅ send_email → Message ID: {sent.get('id')}")
+        return f"Email sent successfully. Message ID: {sent.get('id')}"
     except Exception as e:
-        logger.error(f"❌ Tool Error: send_email - {str(e)}")
-        return f"Error sending email: {str(e)}"
+        logger.error(f"❌ send_email error: {e}")
+        return f"Error sending email: {e}"
 
 
 @mcp.tool()
 def mark_read(message_id: str) -> str:
-    """Mark a message as read by removing the UNREAD label."""
+    """Mark a Gmail message as read."""
     try:
-        service = get_gmail_service()
+        service = _get_gmail_service()
         service.users().messages().modify(
-            userId="me",
-            id=message_id,
+            userId="me", id=message_id,
             body={"removeLabelIds": ["UNREAD"]},
         ).execute()
-        return f"Marked read: {message_id}"
+        return f"Marked as read: {message_id}"
     except Exception as e:
-        return f"Error marking read: {str(e)}"
+        return f"Error marking read: {e}"
 
 
 @mcp.tool()
 def mark_unread(message_id: str) -> str:
-    """Mark a message as unread by adding the UNREAD label."""
+    """Mark a Gmail message as unread."""
     try:
-        service = get_gmail_service()
+        service = _get_gmail_service()
         service.users().messages().modify(
-            userId="me",
-            id=message_id,
+            userId="me", id=message_id,
             body={"addLabelIds": ["UNREAD"]},
         ).execute()
-        return f"Marked unread: {message_id}"
+        return f"Marked as unread: {message_id}"
     except Exception as e:
-        return f"Error marking unread: {str(e)}"
-
-
-# @mcp.tool()
-# def trash_message(message_id: str) -> str:
-#     """Move a message to Trash."""
-#     try:
-#         service = get_gmail_service()
-#         service.users().messages().trash(userId="me", id=message_id).execute()
-#         return f"Trashed message: {message_id}"
-#     except Exception as e:
-#         return f"Error trashing message: {str(e)}"
+        return f"Error marking unread: {e}"
 
 
 @mcp.tool()
 def list_labels() -> str:
-    """List Gmail labels."""
+    """List all Gmail labels."""
     try:
-        service = get_gmail_service()
+        service = _get_gmail_service()
         resp = service.users().labels().list(userId="me").execute()
         labels = resp.get("labels", []) or []
         if not labels:
             return "No labels found."
-
         lines = ["Labels:"]
         for lbl in labels:
             lines.append(f"- {lbl.get('name')} (ID: {lbl.get('id')})")
         return "\n".join(lines)
     except Exception as e:
-        return f"Error listing labels: {str(e)}"
+        return f"Error listing labels: {e}"
 
 
 @mcp.tool()
 def add_label(message_id: str, label: str) -> str:
-    """Add a label to a message (label can be a label ID or label name)."""
+    """Add a label to a Gmail message (by label name or ID)."""
     try:
-        service = get_gmail_service()
+        service = _get_gmail_service()
         label_id = _resolve_label_id(service, label)
-
         service.users().messages().modify(
-            userId="me",
-            id=message_id,
+            userId="me", id=message_id,
             body={"addLabelIds": [label_id]},
         ).execute()
-
-        return f"Added label '{label}' to message: {message_id}"
+        return f"Added label '{label}' to message {message_id}"
     except Exception as e:
-        return f"Error adding label: {str(e)}"
+        return f"Error adding label: {e}"
 
 
 @mcp.tool()
 def remove_label(message_id: str, label: str) -> str:
-    """Remove a label from a message (label can be a label ID or label name)."""
+    """Remove a label from a Gmail message (by label name or ID)."""
     try:
-        service = get_gmail_service()
+        service = _get_gmail_service()
         label_id = _resolve_label_id(service, label)
-
         service.users().messages().modify(
-            userId="me",
-            id=message_id,
+            userId="me", id=message_id,
             body={"removeLabelIds": [label_id]},
         ).execute()
-
-        return f"Removed label '{label}' from message: {message_id}"
+        return f"Removed label '{label}' from message {message_id}"
     except Exception as e:
-        return f"Error removing label: {str(e)}"
+        return f"Error removing label: {e}"
 
 
-if __name__ == "__main__":
-    mcp.run()
-
-
-def get_calendar_service():
-    """Get authenticated Google Calendar service using shared credentials."""
-    creds = get_google_creds()
-    return build('calendar', 'v3', credentials=creds)
+# ══════════════════════════════════════════════════════════════
+# Calendar Tools
+# ══════════════════════════════════════════════════════════════
 
 @mcp.tool()
 def list_events(max_results: int = 10) -> str:
-    """List upcoming calendar events.
-    
+    """List upcoming Google Calendar events.
+
     Args:
-        max_results: Maximum number of events to return (default: 10)
+        max_results: Maximum number of events to return (default: 10).
     """
-    logger.info(f"🛠️ Tool Called: list_events(max_results={max_results})")
+    logger.info(f"🛠️ list_events(max_results={max_results})")
     try:
-        service = get_calendar_service()
-        now = datetime.datetime.utcnow().isoformat() + 'Z'  # 'Z' indicates UTC time
-        
+        service = _get_calendar_service()
+        now = datetime.datetime.utcnow().isoformat() + "Z"
+
         events_result = service.events().list(
-            calendarId='primary', timeMin=now,
+            calendarId="primary", timeMin=now,
             maxResults=max_results, singleEvents=True,
-            orderBy='startTime').execute()
-        events = events_result.get('items', [])
+            orderBy="startTime",
+        ).execute()
+        events = events_result.get("items", [])
 
         if not events:
             return "No upcoming events found."
 
-        result = "Upcoming events:\n"
+        lines = ["Upcoming events:"]
         for event in events:
-            start = event['start'].get('dateTime', event['start'].get('date'))
-            result += f"- {start}: {event['summary']}\n"
-            
-        logger.info(f"✅ Tool Complete: list_events")
-        return result
+            start = event["start"].get("dateTime", event["start"].get("date"))
+            summary = event.get("summary", "(No title)")
+            lines.append(f"- {start}: {summary}")
+
+        logger.info("✅ list_events complete")
+        return "\n".join(lines)
     except Exception as e:
-        logger.error(f"❌ Tool Error: list_events - {str(e)}")
-        return f"Error listing events: {str(e)}"
+        logger.error(f"❌ list_events error: {e}")
+        return f"Error listing events: {e}"
+
 
 @mcp.tool()
-def create_event(summary: str, start_time: str, end_time: str, description: str = "") -> str:
-    """Create a new calendar event.
-    
-    Args:
-        summary: Title of the event
-        start_time: Start time in ISO format (e.g., '2023-10-27T10:00:00')
-        end_time: End time in ISO format
-        description: Optional description of the event
-    """
-    logger.info(f"🛠️ Tool Called: create_event(summary='{summary}', start='{start_time}')")
-    try:
-        service = get_calendar_service()
-        
-        # Appending watermark
-        description = f"{description}{WATERMARK}"
+def create_event(
+    summary: str,
+    start_time: str,
+    end_time: str,
+    description: str = "",
+) -> str:
+    """Create a new Google Calendar event.
 
+    Args:
+        summary: Title of the event.
+        start_time: Start time in ISO 8601 format (e.g. '2024-03-15T10:00:00').
+        end_time: End time in ISO 8601 format.
+        description: Optional description of the event.
+    """
+    logger.info(f"🛠️ create_event(summary='{summary}', start='{start_time}')")
+    try:
+        service = _get_calendar_service()
         event = {
-            'summary': summary,
-            'description': description,
-            'start': {
-                'dateTime': start_time,
-                'timeZone': 'UTC', # You might want to make this configurable
-            },
-            'end': {
-                'dateTime': end_time,
-                'timeZone': 'UTC',
-            },
+            "summary": summary,
+            "description": description,
+            "start": {"dateTime": start_time, "timeZone": "UTC"},
+            "end": {"dateTime": end_time, "timeZone": "UTC"},
         }
-
-        event = service.events().insert(calendarId='primary', body=event).execute()
-        logger.info(f"✅ Tool Complete: create_event")
-        return f"Event created: {event.get('htmlLink')}"
+        created = service.events().insert(calendarId="primary", body=event).execute()
+        logger.info("✅ create_event complete")
+        return f"Event created: {created.get('htmlLink')}"
     except Exception as e:
-        logger.error(f"❌ Tool Error: create_event - {str(e)}")
-        return f"Error creating event: {str(e)}"
+        logger.error(f"❌ create_event error: {e}")
+        return f"Error creating event: {e}"
+
 
 @mcp.tool()
-def create_meeting(summary: str, start_time: str, end_time: str, attendees: List[str] = [], description: str = "") -> str:
-    """Create a new Google Meet video conference.
-    
-    Args:
-        summary: Title of the meeting
-        start_time: Start time in ISO format (e.g., '2023-10-27T10:00:00')
-        end_time: End time in ISO format
-        attendees: List of email addresses to invite
-        description: Optional description of the meeting
-    """
-    try:
-        service = get_calendar_service()
-        
-        # Appending watermark
-        description = f"{description}{WATERMARK}"
+def create_meeting(
+    summary: str,
+    start_time: str,
+    end_time: str,
+    attendees: List[str] = [],
+    description: str = "",
+) -> str:
+    """Create a Google Calendar event with a Google Meet link.
 
+    Args:
+        summary: Title of the meeting.
+        start_time: Start time in ISO 8601 format.
+        end_time: End time in ISO 8601 format.
+        attendees: List of email addresses to invite.
+        description: Optional description of the meeting.
+    """
+    logger.info(f"🛠️ create_meeting(summary='{summary}')")
+    try:
+        service = _get_calendar_service()
         event = {
-            'summary': summary,
-            'description': description,
-            'start': {
-                'dateTime': start_time,
-                'timeZone': 'UTC',
-            },
-            'end': {
-                'dateTime': end_time,
-                'timeZone': 'UTC',
-            },
-            'conferenceData': {
-                'createRequest': {
-                    'requestId': str(uuid.uuid4()),
-                    'conferenceSolutionKey': {'type': 'hangoutsMeet'}
+            "summary": summary,
+            "description": description,
+            "start": {"dateTime": start_time, "timeZone": "UTC"},
+            "end": {"dateTime": end_time, "timeZone": "UTC"},
+            "conferenceData": {
+                "createRequest": {
+                    "requestId": str(uuid.uuid4()),
+                    "conferenceSolutionKey": {"type": "hangoutsMeet"},
                 }
             },
-            'attendees': [{'email': email} for email in attendees],
+            "attendees": [{"email": email} for email in attendees],
         }
-
-        # conferenceDataVersion=1 is required to create a meet link
-        event = service.events().insert(
-            calendarId='primary', 
-            body=event, 
-            conferenceDataVersion=1
+        created = service.events().insert(
+            calendarId="primary", body=event, conferenceDataVersion=1,
         ).execute()
-        
-        meet_link = event.get('hangoutLink', 'No link generated')
-        return f"Meeting created: {event.get('htmlLink')}\nGoogle Meet Link: {meet_link}"
-    except Exception as e:
-        return f"Error creating meeting: {str(e)}"
 
+        meet_link = created.get("hangoutLink", "No link generated")
+        logger.info("✅ create_meeting complete")
+        return f"Meeting created: {created.get('htmlLink')}\nGoogle Meet Link: {meet_link}"
+    except Exception as e:
+        logger.error(f"❌ create_meeting error: {e}")
+        return f"Error creating meeting: {e}"
+
+
+# ══════════════════════════════════════════════════════════════
+# Tool Registry — programmatic access for approval node
+# ══════════════════════════════════════════════════════════════
+
+TOOL_REGISTRY: Dict[str, Any] = {
+    "list_messages": list_messages,
+    "get_message": get_message,
+    "send_email": send_email,
+    "mark_read": mark_read,
+    "mark_unread": mark_unread,
+    "list_labels": list_labels,
+    "add_label": add_label,
+    "remove_label": remove_label,
+    "list_events": list_events,
+    "create_event": create_event,
+    "create_meeting": create_meeting,
+}
+
+
+# ── Standalone MCP server mode ───────────────────────────────
 if __name__ == "__main__":
     mcp.run()

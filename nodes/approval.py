@@ -17,8 +17,11 @@ The ``pending_action`` dict contains:
         "details":   str           # human-readable summary
     }
 
+On approval, the tool is executed programmatically by importing the
+real function from the MCP server module and calling it directly.
+
 Resumes with the user's decision from Telegram buttons:
-  - "approve" → execute the action (TODO: real MCP call)
+  - "approve" → execute the action via direct function call
   - "reject"  → inform user, no side-effect
   - "edit:<instruction>" → re-run agent with the edit instruction
 """
@@ -28,6 +31,48 @@ from langgraph.types import interrupt
 
 logger = logging.getLogger(__name__)
 
+
+# ══════════════════════════════════════════════════════════════
+# Tool Dispatcher — programmatic execution of approved actions
+# ══════════════════════════════════════════════════════════════
+
+def _get_tool_registry() -> dict:
+    """
+    Lazily load the tool registry from MCP server modules.
+    Maps tool names to their implementing functions.
+    """
+    registry = {}
+    try:
+        from mcp_servers.google_workspace import TOOL_REGISTRY
+        registry.update(TOOL_REGISTRY)
+    except ImportError as e:
+        logger.warning(f"Could not load google_workspace tools: {e}")
+    return registry
+
+
+def _execute_tool(action_name: str, tool_args: dict) -> str:
+    """
+    Execute a tool by name with the given arguments.
+    Returns the tool's string result or an error message.
+    """
+    registry = _get_tool_registry()
+    func = registry.get(action_name)
+    if not func:
+        return f"Error: Tool '{action_name}' not found in registry."
+
+    try:
+        logger.info(f"  -> Executing {action_name}({tool_args})")
+        result = func(**tool_args)
+        logger.info(f"  -> {action_name} completed successfully")
+        return result
+    except Exception as e:
+        logger.error(f"  -> {action_name} failed: {e}")
+        return f"Error executing {action_name}: {e}"
+
+
+# ══════════════════════════════════════════════════════════════
+# Approval Node
+# ══════════════════════════════════════════════════════════════
 
 async def human_approval_node(state: dict) -> dict:
     """
@@ -39,7 +84,7 @@ async def human_approval_node(state: dict) -> dict:
     2. LangGraph pauses and saves state to the checkpointer.
     3. FastAPI sends Telegram approval buttons to the user.
     4. User clicks a button → ``Command(resume=decision)`` resumes here.
-    5. This function continues with the decision value.
+    5. On approve → call the real tool function programmatically.
     """
     logger.info("--- [Node: Human Approval] ---")
     pending = state.get("pending_action", {})
@@ -66,15 +111,14 @@ async def human_approval_node(state: dict) -> dict:
     logger.info(f"  -> Human decision received: {decision}")
 
     if decision == "approve":
-        # TODO: Replace this stub with a real MCP tool execution call.
-        # The exact args are available in ``tool_args`` so this only
-        # needs to call the right MCP server.
-        logger.info(f"  -> Approved. Executing {action_name} with args: {tool_args}")
-        args_lines = "\n".join(f"  • **{k}**: {v}" for k, v in tool_args.items())
+        # ── Execute the real tool programmatically ──────────────────
+        result = _execute_tool(action_name, tool_args)
+        args_lines = "\n".join(f"  • {k}: {v}" for k, v in tool_args.items())
         response = (
-            f"✅ *Action Approved & Executed*\n\n"
-            f"**{action_name}** has been completed.\n"
-            + (f"\n{args_lines}" if args_lines else "")
+            f"✅ Action Approved & Executed\n\n"
+            f"{action_name} completed.\n"
+            + (f"\n{args_lines}\n" if args_lines else "")
+            + f"\nResult: {result}"
         )
         return {
             "agent_response": response,
@@ -95,8 +139,8 @@ async def human_approval_node(state: dict) -> dict:
         # Rejected (or unknown decision — always safe-fail to reject)
         logger.info(f"  -> Action rejected (decision={decision!r})")
         response = (
-            f"❌ *Action Rejected*\n\n"
-            f"**{action_name}** was not executed.\n\n"
+            f"❌ Action Rejected\n\n"
+            f"{action_name} was not executed.\n\n"
             f"If you'd like me to try a different approach, just let me know."
         )
         return {

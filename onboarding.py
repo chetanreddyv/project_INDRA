@@ -859,34 +859,63 @@ WIZARD_HTML = r"""
   // ═══ State ═══
   const state = {
     currentStep: 0,
+    highestStep: 0,   // furthest step the user has reached
     validated: { gemini: false, telegram: false, chatId: false },
     values: { gemini: '', telegram: '', chatId: '', botName: '' },
   };
 
+  // ═══ Sidebar click handlers ═══
+  document.querySelectorAll('.steps li').forEach(li => {
+    li.addEventListener('click', () => {
+      const target = parseInt(li.dataset.step);
+      // Allow clicking any step up to the highest reached step
+      if (target <= state.highestStep) {
+        goToStep(target);
+      }
+    });
+  });
+
   // ═══ Navigation ═══
   function goToStep(n) {
-    // Don't navigate forward past validation gates
-    if (n === 2 && !state.validated.gemini)  return;
-    if (n === 3 && !state.validated.telegram) return;
-    if (n === 4 && !state.validated.chatId)   return;
+    // Block forward navigation past what's validated
+    // (but always allow going backward to any visited step)
+    if (n > state.currentStep) {
+      // Moving forward — enforce validation gates
+      if (n >= 2 && !state.validated.gemini)  return;
+      if (n >= 3 && !state.validated.telegram) return;
+      if (n >= 4 && !state.validated.chatId)   return;
+    }
 
     // If going to completion, save config
     if (n === 5) saveConfig();
 
     state.currentStep = n;
+    if (n > state.highestStep) state.highestStep = n;
+
     // Update pages
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     document.getElementById(`page-${n}`).classList.add('active');
 
-    // Update sidebar
+    // Update sidebar — show completed for visited steps, active for current
+    updateSidebar();
+
+    // Sync Next button states (in case validation was invalidated)
+    syncNextButtons();
+  }
+
+  function updateSidebar() {
+    const n = state.currentStep;
     document.querySelectorAll('.steps li').forEach(li => {
       const s = parseInt(li.dataset.step);
       li.classList.remove('active', 'completed');
       if (s === n) li.classList.add('active');
-      else if (s < n) li.classList.add('completed');
+      else if (s < state.highestStep || (s < n)) li.classList.add('completed');
+
+      // Make visited steps look clickable
+      li.style.cursor = s <= state.highestStep ? 'pointer' : 'default';
     });
 
-    // Update completed dots
+    // Update dots
     document.querySelectorAll('.steps li.completed .step-dot').forEach(dot => {
       dot.textContent = '✓';
     });
@@ -895,6 +924,66 @@ WIZARD_HTML = r"""
       if (dot.parentElement.dataset.step === '5') dot.textContent = '✦';
       else dot.textContent = idx;
     });
+  }
+
+  function syncNextButtons() {
+    document.getElementById('btnNext1').disabled = !state.validated.gemini;
+    document.getElementById('btnNext2').disabled = !state.validated.telegram;
+    document.getElementById('btnNext3').disabled = !state.validated.chatId;
+  }
+
+  // ═══ Re-validation on input change ═══
+  // If the user edits a field that was already validated, invalidate it
+  // and all downstream steps so they must re-confirm
+  document.getElementById('geminiKey').addEventListener('input', () => {
+    if (state.validated.gemini) {
+      state.validated.gemini = false;
+      state.values.gemini = '';
+      // Invalidate downstream
+      state.validated.telegram = false;
+      state.validated.chatId = false;
+      // Reset field styling
+      document.getElementById('geminiKey').className = 'input-field';
+      document.getElementById('geminiResult').className = 'feedback';
+      resetDownstreamFields('telegram');
+      resetDownstreamFields('chatId');
+      syncNextButtons();
+    }
+  });
+
+  document.getElementById('telegramToken').addEventListener('input', () => {
+    if (state.validated.telegram) {
+      state.validated.telegram = false;
+      state.values.telegram = '';
+      state.values.botName = '';
+      // Invalidate downstream
+      state.validated.chatId = false;
+      document.getElementById('telegramToken').className = 'input-field';
+      document.getElementById('telegramResult').className = 'feedback';
+      resetDownstreamFields('chatId');
+      syncNextButtons();
+    }
+  });
+
+  document.getElementById('chatIds').addEventListener('input', () => {
+    if (state.validated.chatId) {
+      state.validated.chatId = false;
+      state.values.chatId = '';
+      document.getElementById('chatIds').className = 'input-field';
+      document.getElementById('chatIdResult').className = 'feedback';
+      syncNextButtons();
+    }
+  });
+
+  function resetDownstreamFields(field) {
+    if (field === 'telegram') {
+      document.getElementById('telegramToken').className = 'input-field';
+      document.getElementById('telegramResult').className = 'feedback';
+    }
+    if (field === 'chatId') {
+      document.getElementById('chatIds').className = 'input-field';
+      document.getElementById('chatIdResult').className = 'feedback';
+    }
   }
 
   // ═══ Validation ═══
@@ -920,7 +1009,7 @@ WIZARD_HTML = r"""
       field.className = 'input-field ' + (data.valid ? 'valid' : 'invalid');
       state.validated.gemini = data.valid;
       if (data.valid) state.values.gemini = key;
-      document.getElementById('btnNext1').disabled = !data.valid;
+      syncNextButtons();
     } catch (e) {
       fb.className = 'feedback error';
       fb.textContent = 'Network error — check your connection.';
@@ -954,7 +1043,7 @@ WIZARD_HTML = r"""
         state.values.telegram = key;
         state.values.botName = data.bot_name || '';
       }
-      document.getElementById('btnNext2').disabled = !data.valid;
+      syncNextButtons();
     } catch (e) {
       fb.className = 'feedback error';
       fb.textContent = 'Network error — check your connection.';
@@ -985,7 +1074,7 @@ WIZARD_HTML = r"""
       field.className = 'input-field ' + (data.valid ? 'valid' : 'invalid');
       state.validated.chatId = data.valid;
       if (data.valid) state.values.chatId = key;
-      document.getElementById('btnNext3').disabled = !data.valid;
+      syncNextButtons();
     } catch (e) {
       fb.className = 'feedback error';
       fb.textContent = 'Network error — check your connection.';

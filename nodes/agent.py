@@ -97,10 +97,21 @@ def _make_write_action_tool(action_name: str, skill_name: str):
     *intercepts* the call and raises ``WriteActionRequiresApproval``
     before any real side-effect runs.
 
-    The ``action_name`` is embedded in the closure so each generated
-    wrapper is specific to that action.
+    Copies the real tool's signature and docstring from the MCP server
+    module so the LLM sees proper parameter schemas.
     """
-    async def _interceptor(**kwargs) -> str:   # noqa: ANN202
+    import inspect
+    import functools
+
+    # Try to load the real function's metadata for accurate schema
+    real_func = None
+    try:
+        from mcp_servers.google_workspace import TOOL_REGISTRY
+        real_func = TOOL_REGISTRY.get(action_name)
+    except ImportError:
+        pass
+
+    async def _interceptor(**kwargs) -> str:
         logger.warning(
             f"  -> [GATE] Write action intercepted by Python: {action_name}"
         )
@@ -110,13 +121,17 @@ def _make_write_action_tool(action_name: str, skill_name: str):
             skill=skill_name,
         )
 
-    # Give the function a meaningful name so Pydantic AI can register it
+    # Copy real function's metadata onto the interceptor
     _interceptor.__name__ = action_name
-    _interceptor.__doc__ = (
-        f"Tool '{action_name}' has been intercepted by the Python approval gate. "
-        "This function will never execute a side-effect — it raises "
-        "WriteActionRequiresApproval so the graph pauses for human approval."
-    )
+    if real_func:
+        # Copy signature so the LLM sees real parameter names + types
+        real_sig = inspect.signature(real_func)
+        _interceptor.__signature__ = real_sig
+        _interceptor.__doc__ = real_func.__doc__ or f"Execute {action_name}."
+        _interceptor.__annotations__ = getattr(real_func, "__annotations__", {})
+    else:
+        _interceptor.__doc__ = f"Execute {action_name}. (No schema available.)"
+
     return _interceptor
 
 
