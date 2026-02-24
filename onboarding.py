@@ -183,35 +183,34 @@ WIZARD_HTML = r"""
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   :root {
-    --bg-deep:        #07060e;
-    --bg-card:        rgba(18, 15, 35, 0.70);
-    --bg-sidebar:     rgba(14, 11, 28, 0.85);
-    --border-subtle:  rgba(212, 175, 55, 0.12);
-    --border-glow:    rgba(212, 175, 55, 0.25);
+    --bg-deep:        #f5f0e8;
+    --bg-card:        rgba(255, 255, 255, 0.55);
+    --bg-sidebar:     rgba(255, 255, 255, 0.50);
+    --border-subtle:  rgba(212, 175, 55, 0.20);
+    --border-glow:    rgba(212, 175, 55, 0.40);
 
-    /* 2-3 tone palette: Deep Indigo + Saffron Gold + Subtle Maroon */
-    --gold:           #d4a017;
-    --gold-light:     #f0d060;
-    --gold-dim:       rgba(212, 160, 23, 0.35);
-    --indigo:         #2d1b69;
-    --indigo-light:   #4a2fa0;
-    --maroon:         #6b1030;
-    --maroon-dim:     rgba(107, 16, 48, 0.3);
+    --gold:           #b8860b;
+    --gold-light:     #d4a017;
+    --gold-dim:       rgba(212, 160, 23, 0.30);
 
-    --text-primary:   #f0e6d2;
-    --text-secondary: #a89b80;
-    --text-dim:       #6b6050;
+    --text-primary:   #1a1710;
+    --text-secondary: #6b5e40;
+    --text-dim:       #9e9480;
 
-    --success:        #34d399;
-    --error:          #f87171;
+    --success:        #16a34a;
+    --error:          #dc2626;
 
     --font-body:  'Inter', sans-serif;
     --font-royal: 'Cinzel', serif;
+
+    --glass-bg:       rgba(255, 255, 255, 0.50);
+    --glass-border:   rgba(212, 175, 55, 0.25);
+    --glass-shadow:   0 8px 32px rgba(180, 140, 20, 0.08);
   }
 
   body {
     font-family: var(--font-body);
-    background: var(--bg-deep);
+    background: linear-gradient(145deg, #faf7f0 0%, #f0e8d8 40%, #ede4d0 100%);
     color: var(--text-primary);
     min-height: 100vh;
     overflow-x: hidden;
@@ -223,9 +222,9 @@ WIZARD_HTML = r"""
     position: fixed;
     inset: 0;
     background:
-      radial-gradient(ellipse 800px 600px at 20% 30%, rgba(45, 27, 105, 0.35) 0%, transparent 70%),
-      radial-gradient(ellipse 600px 500px at 80% 70%, rgba(107, 16, 48, 0.20) 0%, transparent 70%),
-      radial-gradient(ellipse 400px 400px at 50% 50%, rgba(212, 160, 23, 0.08) 0%, transparent 70%);
+      radial-gradient(ellipse 900px 700px at 15% 20%, rgba(212, 175, 55, 0.10) 0%, transparent 70%),
+      radial-gradient(ellipse 600px 500px at 85% 75%, rgba(212, 160, 23, 0.07) 0%, transparent 70%),
+      radial-gradient(ellipse 500px 500px at 50% 50%, rgba(255, 255, 255, 0.40) 0%, transparent 70%);
     pointer-events: none;
     z-index: 0;
   }
@@ -243,12 +242,13 @@ WIZARD_HTML = r"""
     width: 280px;
     min-height: 100vh;
     background: var(--bg-sidebar);
-    border-right: 1px solid var(--border-subtle);
+    border-right: 1px solid var(--glass-border);
     padding: 40px 24px;
     display: flex;
     flex-direction: column;
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
+    backdrop-filter: blur(24px) saturate(1.4);
+    -webkit-backdrop-filter: blur(24px) saturate(1.4);
+    box-shadow: 1px 0 12px rgba(180, 140, 20, 0.04);
   }
 
   .logo-section {
@@ -265,7 +265,7 @@ WIZARD_HTML = r"""
     display: flex;
     align-items: center;
     justify-content: center;
-    box-shadow: 0 0 40px rgba(212, 160, 23, 0.30), 0 0 80px rgba(212, 160, 23, 0.10);
+    box-shadow: 0 0 40px rgba(212, 160, 23, 0.20), 0 0 80px rgba(212, 160, 23, 0.06);
     font-size: 32px;
   }
 
@@ -275,7 +275,7 @@ WIZARD_HTML = r"""
     font-weight: 700;
     color: var(--gold);
     letter-spacing: 4px;
-    text-shadow: 0 0 30px rgba(212, 160, 23, 0.3);
+    text-shadow: 0 0 30px rgba(212, 160, 23, 0.15);
   }
 
   .logo-subtitle {
@@ -302,10 +302,10 @@ WIZARD_HTML = r"""
     color: var(--text-dim);
   }
 
-  .steps li:hover { background: rgba(212, 160, 23, 0.05); }
+  .steps li:hover { background: rgba(212, 175, 55, 0.06); }
   .steps li.active {
-    background: rgba(212, 160, 23, 0.08);
-    color: var(--gold-light);
+    background: rgba(212, 175, 55, 0.10);
+    color: var(--gold);
     border: 1px solid var(--border-glow);
   }
   .steps li.completed { color: var(--success); }
@@ -325,13 +325,13 @@ WIZARD_HTML = r"""
   }
   .steps li.active .step-dot {
     border-color: var(--gold);
-    background: var(--gold-dim);
-    color: var(--gold-light);
-    box-shadow: 0 0 12px rgba(212, 160, 23, 0.25);
+    background: rgba(212, 175, 55, 0.15);
+    color: var(--gold);
+    box-shadow: 0 0 12px rgba(212, 160, 23, 0.20);
   }
   .steps li.completed .step-dot {
     border-color: var(--success);
-    background: rgba(52, 211, 153, 0.15);
+    background: rgba(22, 163, 74, 0.10);
     color: var(--success);
   }
 
@@ -356,14 +356,14 @@ WIZARD_HTML = r"""
     width: 100%;
     max-width: 640px;
     background: var(--bg-card);
-    border: 1px solid var(--border-subtle);
+    border: 1px solid var(--glass-border);
     border-radius: 20px;
     padding: 48px;
-    backdrop-filter: blur(24px);
-    -webkit-backdrop-filter: blur(24px);
+    backdrop-filter: blur(24px) saturate(1.4);
+    -webkit-backdrop-filter: blur(24px) saturate(1.4);
     box-shadow:
-      0 4px 60px rgba(0, 0, 0, 0.4),
-      inset 0 1px 0 rgba(212, 175, 55, 0.06);
+      var(--glass-shadow),
+      inset 0 1px 0 rgba(255, 255, 255, 0.60);
     animation: fadeUp 0.5s ease;
   }
 
@@ -399,14 +399,16 @@ WIZARD_HTML = r"""
 
   /* ─── Instruction box ──────────────────────────────────── */
   .instructions {
-    background: rgba(45, 27, 105, 0.2);
-    border: 1px solid rgba(74, 47, 160, 0.25);
+    background: rgba(212, 175, 55, 0.06);
+    border: 1px solid rgba(212, 175, 55, 0.18);
     border-radius: 12px;
     padding: 20px;
     margin-bottom: 28px;
     font-size: 13px;
     line-height: 1.8;
     color: var(--text-secondary);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
   }
   .instructions ol { padding-left: 20px; }
   .instructions li { margin-bottom: 6px; }
@@ -434,8 +436,8 @@ WIZARD_HTML = r"""
 
   .input-field {
     flex: 1;
-    background: rgba(7, 6, 14, 0.6);
-    border: 1px solid var(--border-subtle);
+    background: rgba(255, 255, 255, 0.70);
+    border: 1px solid rgba(212, 175, 55, 0.20);
     border-radius: 10px;
     padding: 14px 16px;
     font-size: 14px;
@@ -443,12 +445,14 @@ WIZARD_HTML = r"""
     color: var(--text-primary);
     outline: none;
     transition: border-color 0.25s, box-shadow 0.25s;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
   }
 
   .input-field::placeholder { color: var(--text-dim); }
   .input-field:focus {
     border-color: var(--gold);
-    box-shadow: 0 0 0 3px rgba(212, 160, 23, 0.10);
+    box-shadow: 0 0 0 3px rgba(212, 160, 23, 0.12);
   }
   .input-field.valid   { border-color: var(--success); }
   .input-field.invalid { border-color: var(--error); }
@@ -466,12 +470,13 @@ WIZARD_HTML = r"""
   }
 
   .btn-validate {
-    background: linear-gradient(135deg, var(--indigo), var(--indigo-light));
-    color: var(--text-primary);
-    border: 1px solid rgba(74, 47, 160, 0.4);
+    background: rgba(212, 175, 55, 0.12);
+    color: var(--gold);
+    border: 1px solid rgba(212, 175, 55, 0.30);
   }
   .btn-validate:hover {
-    box-shadow: 0 0 20px rgba(74, 47, 160, 0.3);
+    background: rgba(212, 175, 55, 0.20);
+    box-shadow: 0 0 16px rgba(212, 160, 23, 0.12);
     transform: translateY(-1px);
   }
   .btn-validate:disabled {
@@ -481,14 +486,14 @@ WIZARD_HTML = r"""
   }
 
   .btn-next {
-    background: linear-gradient(135deg, var(--gold), #c49515);
-    color: var(--bg-deep);
+    background: linear-gradient(135deg, var(--gold), #a07608);
+    color: #fff;
     font-weight: 700;
     min-width: 140px;
-    box-shadow: 0 0 20px rgba(212, 160, 23, 0.15);
+    box-shadow: 0 4px 20px rgba(212, 160, 23, 0.18);
   }
   .btn-next:hover {
-    box-shadow: 0 0 30px rgba(212, 160, 23, 0.30);
+    box-shadow: 0 6px 28px rgba(212, 160, 23, 0.30);
     transform: translateY(-1px);
   }
   .btn-next:disabled {
@@ -498,12 +503,14 @@ WIZARD_HTML = r"""
   }
 
   .btn-back {
-    background: transparent;
+    background: rgba(255, 255, 255, 0.50);
     border: 1px solid var(--border-subtle);
     color: var(--text-secondary);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
   }
   .btn-back:hover {
-    background: rgba(212, 175, 55, 0.05);
+    background: rgba(212, 175, 55, 0.08);
     border-color: var(--border-glow);
   }
 
@@ -525,14 +532,14 @@ WIZARD_HTML = r"""
   }
   .feedback.success {
     display: block;
-    background: rgba(52, 211, 153, 0.08);
-    border: 1px solid rgba(52, 211, 153, 0.25);
+    background: rgba(22, 163, 74, 0.08);
+    border: 1px solid rgba(22, 163, 74, 0.25);
     color: var(--success);
   }
   .feedback.error {
     display: block;
-    background: rgba(248, 113, 113, 0.08);
-    border: 1px solid rgba(248, 113, 113, 0.25);
+    background: rgba(220, 38, 38, 0.06);
+    border: 1px solid rgba(220, 38, 38, 0.20);
     color: var(--error);
   }
 
@@ -541,7 +548,7 @@ WIZARD_HTML = r"""
     display: inline-block;
     width: 16px;
     height: 16px;
-    border: 2px solid rgba(240, 230, 210, 0.3);
+    border: 2px solid rgba(212, 175, 55, 0.20);
     border-top-color: var(--gold);
     border-radius: 50%;
     animation: spin 0.6s linear infinite;
@@ -561,26 +568,29 @@ WIZARD_HTML = r"""
     align-items: center;
     justify-content: center;
     font-size: 36px;
-    box-shadow: 0 0 60px rgba(212, 160, 23, 0.35);
+    box-shadow: 0 0 60px rgba(212, 160, 23, 0.20), 0 0 120px rgba(212, 160, 23, 0.06);
   }
 
   .cmd-block {
-    background: rgba(7, 6, 14, 0.8);
-    border: 1px solid var(--border-subtle);
+    background: rgba(255, 255, 255, 0.65);
+    border: 1px solid var(--glass-border);
     border-radius: 10px;
     padding: 16px 20px;
     font-family: 'Courier New', monospace;
     font-size: 14px;
-    color: var(--gold-light);
+    color: var(--gold);
     margin: 20px 0;
     position: relative;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    box-shadow: var(--glass-shadow);
   }
   .cmd-block .copy-btn {
     position: absolute;
     right: 10px;
     top: 10px;
-    background: rgba(212, 160, 23, 0.15);
-    border: 1px solid var(--border-glow);
+    background: rgba(212, 175, 55, 0.10);
+    border: 1px solid rgba(212, 175, 55, 0.25);
     color: var(--gold);
     padding: 4px 12px;
     border-radius: 6px;
@@ -588,14 +598,16 @@ WIZARD_HTML = r"""
     cursor: pointer;
     transition: all 0.2s;
   }
-  .cmd-block .copy-btn:hover { background: rgba(212, 160, 23, 0.25); }
+  .cmd-block .copy-btn:hover { background: rgba(212, 175, 55, 0.20); }
 
   .config-summary {
-    background: rgba(45, 27, 105, 0.15);
-    border: 1px solid rgba(74, 47, 160, 0.2);
+    background: rgba(212, 175, 55, 0.06);
+    border: 1px solid rgba(212, 175, 55, 0.18);
     border-radius: 12px;
     padding: 20px;
     margin: 20px 0;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
   }
   .config-summary h4 {
     color: var(--text-secondary);
@@ -608,7 +620,7 @@ WIZARD_HTML = r"""
     display: flex;
     justify-content: space-between;
     padding: 8px 0;
-    border-bottom: 1px solid rgba(212, 175, 55, 0.06);
+    border-bottom: 1px solid rgba(212, 175, 55, 0.08);
     font-size: 13px;
   }
   .config-row:last-child { border-bottom: none; }
