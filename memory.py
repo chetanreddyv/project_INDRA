@@ -424,7 +424,7 @@ class ZvecMemoryStore:
             return ""
         return "\n".join(f"- [{item['kind']}] {item['text']}" for item in items)
 
-    async def get_relevant_skills(self, query: str, top_k: int = 2, threshold: float = 0.35) -> str:
+    async def get_relevant_skills(self, query: str, top_k: int = 2, threshold: float = 0.55) -> str:
         """Search Zvec for skills relevant to the query. Only returns skills above score threshold."""
         if not self.skill_collection:
             return ""
@@ -442,13 +442,18 @@ class ZvecMemoryStore:
             for res in results:
                 if res.id == HEALTH_ID:
                     continue
+                
+                # Log the score at INFO level temporarily so we can debug relevance
+                logger.info(f"  -> Found skill chunk {res.id} with score {res.score:.3f}")
+                
                 if res.score < threshold:
-                    logger.debug(f"  -> Skill chunk {res.id} below threshold ({res.score:.3f} < {threshold})")
+                    logger.info(f"  -> Skipping skill chunk {res.id} (below threshold {threshold})")
                     continue
+                    
                 skill_id = res.id.rsplit("_", 1)[0]
                 if skill_id not in skill_names:
                     skill_names.append(skill_id)
-                    logger.debug(f"  -> Skill match: {skill_id} (score={res.score:.3f})")
+                    logger.info(f"  -> Skill accepted: {skill_id} (score={res.score:.3f})")
             
             skill_names = skill_names[:top_k]
             
