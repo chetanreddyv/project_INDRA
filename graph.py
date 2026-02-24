@@ -10,10 +10,8 @@ from typing import TypedDict, Optional, Any
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from nodes.router import router_node
 from nodes.agent import agent_node
 from nodes.approval import human_approval_node
-from nodes.synthesizer import synthesizer_node
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +26,6 @@ class AgentState(TypedDict):
     # ── Core ──────────────────────────────────────────────────
     chat_id: str                              # Telegram chat ID (= thread_id)
     user_input: str                           # Current user message
-
-    # ── Routing ───────────────────────────────────────────────
-    skill_selected: Optional[str]             # Which skill the router picked
-    routing_reasoning: Optional[str]          # Why the router chose this skill
 
     # ── Agent ─────────────────────────────────────────────────
     agent_response: Optional[str]             # Final response text
@@ -48,9 +42,9 @@ class AgentState(TypedDict):
 
 def route_after_agent(state: AgentState) -> str:
     """Decide what happens after the agent node."""
-    # If agent hit max failures, go straight to synthesizer
+    # If agent hit max failures, go straight to END
     if state.get("tool_failure_count", 0) >= 3:
-        return "synthesizer"
+        return END
     # If agent needs a retry (self-correction)
     if state.get("_retry"):
         return "agent"
@@ -58,7 +52,7 @@ def route_after_agent(state: AgentState) -> str:
     if state.get("pending_action"):
         return "human_approval"
     # Normal completion
-    return "synthesizer"
+    return END
 
 
 def route_after_approval(state: AgentState) -> str:
@@ -66,7 +60,7 @@ def route_after_approval(state: AgentState) -> str:
     # If user requested an edit, re-run the agent
     if state.get("_needs_rerun"):
         return "agent"
-    return "synthesizer"
+    return END
 
 
 # ==========================================================
@@ -88,25 +82,21 @@ def build_graph(checkpointer=None):
     builder = StateGraph(AgentState)
 
     # Add nodes
-    builder.add_node("router", router_node)
     builder.add_node("agent", agent_node)
     builder.add_node("human_approval", human_approval_node)
-    builder.add_node("synthesizer", synthesizer_node)
 
     # Wire edges
-    builder.add_edge(START, "router")
-    builder.add_edge("router", "agent")
+    builder.add_edge(START, "agent")
     builder.add_conditional_edges(
         "agent",
         route_after_agent,
-        ["human_approval", "agent", "synthesizer"],
+        ["human_approval", "agent", END],
     )
     builder.add_conditional_edges(
         "human_approval",
         route_after_approval,
-        ["agent", "synthesizer"],
+        ["agent", END],
     )
-    builder.add_edge("synthesizer", END)
 
     # Compile with checkpointer
     graph = builder.compile(checkpointer=checkpointer)

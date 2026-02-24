@@ -48,7 +48,7 @@ class TelegramClient:
         self,
         chat_id: int,
         text: str,
-        parse_mode: str = "HTML",
+        parse_mode: Optional[str] = "Markdown",
         reply_markup: Optional[dict] = None,
     ) -> dict:
         """Send a text message. Splits into chunks if > 4096 chars."""
@@ -102,7 +102,7 @@ class TelegramClient:
         callback_data encodes the thread_id so we can resume the right graph.
         """
         text = (
-            f"🔐 <b>Action Requires Approval</b>\n\n"
+            f"🔐 **Action Requires Approval**\n\n"
             f"{action_summary}\n\n"
             f"Choose an action below:"
         )
@@ -120,7 +120,7 @@ class TelegramClient:
         return await self.send_message(
             chat_id=chat_id,
             text=text,
-            parse_mode="HTML",
+            parse_mode="Markdown",
             reply_markup=reply_markup,
         )
 
@@ -137,7 +137,7 @@ class TelegramClient:
         chat_id: int,
         message_id: int,
         text: str,
-        parse_mode: str = "HTML",
+        parse_mode: Optional[str] = "Markdown",
     ) -> dict:
         """Edit an existing message (e.g., to update after approval)."""
         return await self._call(

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # Pydantic structured output for Telegram to avoid Markdown errors
 class AgentResponse(BaseModel):
     response: str = Field(
-        description="The final message to send to the user. MUST be formatted using ONLY valid Telegram HTML tags (<b>, <i>, <u>, <s>, <a href=\"...\">, <code>, <pre>). Do NOT use Markdown asterisks or underscores."
+        description="The final message to send to the user. MUST be formatted using standard Markdown (so you can use *, _, `, ```, lists, etc). Do NOT use HTML tags."
     )
 
 # Paths
@@ -26,15 +26,7 @@ MCP_CONFIG_PATH = Path(__file__).parent.parent / "config" / "mcp_config.json"
 IDENTITY_FILE = Path(__file__).parent.parent / "identity.md"
 
 
-def _load_skill_prompt(skill_name: str) -> str:
-    """Load a skill's system prompt from the skills/ directory."""
-    skill_file = SKILLS_DIR / f"{skill_name}.md"
-    if skill_file.exists():
-        content = skill_file.read_text()
-        logger.info(f"  -> Loaded skill prompt: {skill_file.name}")
-        return content
-    logger.warning(f"  -> Skill file not found: {skill_file}, using default")
-    return "You are a helpful personal assistant. Be concise and accurate."
+
 
 
 def _load_identity_prompt() -> str:
@@ -51,43 +43,49 @@ def _load_mcp_config() -> dict:
     return {}
 
 
-def _get_write_actions(skill_name: str) -> list[str]:
-    """Get the list of write/destructive actions for a skill."""
+def _get_all_write_actions() -> list[str]:
+    """Get the list of write/destructive actions across all configured skills."""
     config = _load_mcp_config()
-    skill_config = config.get(skill_name, {})
-    return skill_config.get("write_actions", [])
+    write_actions = []
+    for skill_config in config.values():
+        if isinstance(skill_config, dict):
+            write_actions.extend(skill_config.get("write_actions", []))
+    return list(set(write_actions))
 
 
 async def agent_node(state: dict) -> dict:
     """
-    Execute the Pydantic AI agent with dynamically loaded skill + tools.
+    Execute the Pydantic AI agent with dynamically loaded skills + tools.
     
     Flow:
-    1. Load skill prompt based on router selection
+    1. Load all skill prompts to give agent full context
     2. Run agent with user input + conversation context
     3. If agent wants to execute a write action → set pending_action for HITL
     4. On tool failure → increment failure count and retry (up to 3x)
     """
     logger.info("--- [Node: Agent] ---")
     
-    skill = state.get("skill_selected", "general_chat")
     user_input = state.get("user_input", "")
     tool_failure_count = state.get("tool_failure_count", 0)
     
-    # Load skill-specific system prompt
-    skill_prompt = _load_skill_prompt(skill)
+
     
     # Load core identity
     identity_prompt = _load_identity_prompt()
     
-    # Fetch long-term memory context
+    # Fetch long-term memory context and dynamic skill context
     memory_context = ""
+    skill_prompts = "You are a helpful personal assistant. Be concise and accurate."
     thread_id = state.get("chat_id", "default_thread")
     try:
         from memory import memorygate
         memory_context = await memorygate.get_context(thread_id=thread_id)
+        if memory_context != "No established context.":
+            logger.info(f"  -> Successfully retrieved memory context ({len(memory_context)} chars)")
+            
+        skill_prompts = await memorygate.get_relevant_skills(user_input)
     except Exception as e:
-        logger.debug(f"  -> Memory context retrieval skipped: {e}")
+        logger.warning(f"  -> Context/Skill retrieval skipped/failed: {e}")
     
     # Construct full system prompt: Identity -> Memory -> Skill
     prompt_parts = []
@@ -95,7 +93,7 @@ async def agent_node(state: dict) -> dict:
         prompt_parts.append(identity_prompt)
     if memory_context:
         prompt_parts.append(f"## User Context (from long-term memory)\n{memory_context}")
-    prompt_parts.append(skill_prompt)
+    prompt_parts.append(skill_prompts)
     
     full_system_prompt = "\n\n---\n\n".join(prompt_parts)
     
@@ -113,7 +111,7 @@ async def agent_node(state: dict) -> dict:
         # Check if the response indicates a write action was requested
         # (In a full implementation, this would use MCP tool calls and
         # intercept them. For now, we detect intent from the response.)
-        write_actions = _get_write_actions(skill)
+        write_actions = _get_all_write_actions()
         
         # Simple heuristic: if the skill has write tools and the user
         # is asking to do something (not just read), flag for approval
@@ -130,7 +128,7 @@ async def agent_node(state: dict) -> dict:
                 pending_action = {
                     "action": action,
                     "details": response_text,
-                    "skill": skill,
+                    "skill": "all",
                 }
                 logger.info(f"  -> Write action detected: {action}, routing to HITL")
                 break

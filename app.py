@@ -369,10 +369,8 @@ async def _run_memorygate(thread_id: str, user_input: str, agent_response: str):
     try:
         from memory import memorygate
         await memorygate.process(thread_id, user_input, agent_response)
-    except ImportError:
-        logger.debug("Memorygate not yet implemented, skipping")
     except Exception as e:
-        logger.error(f"Memorygate error: {e}")
+        logger.error(f"Memorygate error: {e}", exc_info=True)
 
 
 # ==========================================================

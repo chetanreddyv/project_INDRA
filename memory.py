@@ -25,7 +25,9 @@ logger = logging.getLogger(__name__)
 # Paths
 MEMORY_DIR = Path(__file__).parent / "data"
 ZVEC_PATH = str(MEMORY_DIR / "zvec_index")
+ZVEC_SKILLS_PATH = str(MEMORY_DIR / "zvec_skills")
 SQLITE_PATH = str(MEMORY_DIR / "agent_session.db")
+SKILLS_DIR = Path(__file__).parent / "skills"
 
 MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -187,6 +189,7 @@ class DatabaseClient:
 
 
 from fastembed import TextEmbedding
+from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 
 # ==========================================================
 # 3. Zvec Vector Store
@@ -203,9 +206,11 @@ class ZvecMemoryStore:
         self.embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
         # bge-small-en-v1.5 embedding dimension is 384
         self.dim = 384
-
+        
+        self.skill_collection = None
+        
     def initialize(self):
-        """Must be called on startup to open the Zvec index."""
+        """Must be called on startup to open the Zvec indexes."""
         schema = zvec.CollectionSchema(
             name="agent_memory",
             vectors=zvec.VectorSchema("embedding", zvec.DataType.VECTOR_FP32, self.dim),
@@ -216,6 +221,16 @@ class ZvecMemoryStore:
             self.collection = zvec.open(path=ZVEC_PATH)
         except Exception:
             self.collection = zvec.create_and_open(path=ZVEC_PATH, schema=schema)
+            
+        # 2. Skill Store
+        skill_schema = zvec.CollectionSchema(
+            name="skill_memory",
+            vectors=zvec.VectorSchema("embedding", zvec.DataType.VECTOR_FP32, self.dim),
+        )
+        try:
+            self.skill_collection = zvec.open(path=ZVEC_SKILLS_PATH)
+        except Exception:
+            self.skill_collection = zvec.create_and_open(path=ZVEC_SKILLS_PATH, schema=skill_schema)
 
     async def _embed(self, texts: List[str]) -> List[List[float]]:
         """Generate local vector embeddings using FastEmbed."""
@@ -259,6 +274,50 @@ class ZvecMemoryStore:
         except Exception as e:
             logger.error(f"Zvec query failed: {e}")
             return ""
+
+    async def get_relevant_skills(self, query: str, top_k: int = 2) -> str:
+        """Search Zvec for skills most relevant to the query to prevent prompt drift."""
+        if not self.skill_collection:
+            return ""
+            
+        vector = (await self._embed([query]))[0]
+        
+        try:
+            results = self.skill_collection.query(
+                zvec.VectorQuery("embedding", vector=vector),
+                topk=top_k * 2 # get more chunks initially to find unique skills
+            )
+            
+            # The .id here is "skill_name::chunk_index"
+            # We want unique skill names
+            skill_names = []
+            for res in results:
+                skill_id = res.id.rsplit("_", 1)[0]
+                if skill_id not in skill_names:
+                    skill_names.append(skill_id)
+            
+            # We only care about the top_k unique skills
+            skill_names = skill_names[:top_k]
+            
+            if not skill_names:
+                return "You are a helpful personal assistant. Be concise and accurate."
+                
+            prompts = []
+            for skill_name in skill_names:
+                skill_file = SKILLS_DIR / f"{skill_name}.md"
+                if skill_file.exists():
+                    content = skill_file.read_text()
+                    prompts.append(f"## {skill_name.replace('_', ' ').title()}\n{content}")
+                    logger.info(f"  -> Retrieving dynamic skill prompt: {skill_file.name}")
+                    
+            if not prompts:
+                return "You are a helpful personal assistant. Be concise and accurate."
+                
+            return "\n\n".join(prompts)
+            
+        except Exception as e:
+            logger.error(f"Zvec skills query failed: {e}")
+            return "You are a helpful personal assistant. Be concise and accurate."
 
     async def apply_updates(self, memory: ExtractedMemory):
         """Safely sync SQLite and Zvec."""
@@ -305,6 +364,55 @@ class ZvecMemoryStore:
                 except Exception as e:
                     logger.error(f"Zvec insert failed: {e}")
 
+    async def initialize_skills(self):
+        """Called on startup to embed skills/*.md so Zvec can retrieve them."""
+        if not SKILLS_DIR.exists() or not self.skill_collection:
+            return
+            
+        skills_to_embed = []
+        skill_ids = []
+        
+        # Splitters
+        headers_to_split_on = [
+            ("#", "Header 1"),
+            ("##", "Header 2"),
+            ("###", "Header 3"),
+        ]
+        markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
+        
+        # Load all .md files
+        for skill_file in SKILLS_DIR.glob("*.md"):
+            skill_id = skill_file.stem  # e.g. "google_workspace"
+            content = skill_file.read_text()
+            
+            # 1. Split by header
+            md_docs = markdown_splitter.split_text(content)
+            
+            # 2. Split large chunks recursively
+            final_chunks = text_splitter.split_documents(md_docs)
+            
+            for i, chunk in enumerate(final_chunks):
+                skills_to_embed.append(chunk.page_content)
+                skill_ids.append(f"{skill_id}_{i}")
+            
+        if not skills_to_embed:
+            return
+            
+        embeddings = await self._embed(skills_to_embed)
+        
+        docs_to_zvec = []
+        for s_id, vector in zip(skill_ids, embeddings):
+            docs_to_zvec.append(zvec.Doc(id=s_id, vectors={"embedding": vector}))
+            
+        try:
+            # We rewrite the collection on startup just in case the config changed
+            # (assuming Zvec supports upsert, otherwise we just insert)
+            self.skill_collection.insert(docs_to_zvec)
+            logger.info(f"✅ Embedded {len(docs_to_zvec)} skills into dynamic Zvec memory")
+        except Exception as e:
+            logger.error(f"Zvec skills insert failed: {e}")
+
 
 # ==========================================================
 # 4. MemoryGate Interface
@@ -321,6 +429,7 @@ class MemoryGate:
         """Must be called at application startup."""
         self.db.initialize()
         self.store.initialize()
+        await self.store.initialize_skills()
 
     async def process(self, thread_id: str, user_input: str, agent_response: str):
         """Background extraction triggered after a turn."""
@@ -372,6 +481,10 @@ class MemoryGate:
             parts.append(history_str)
             
         return "\n".join(parts) if parts else "No established context."
+
+    async def get_relevant_skills(self, user_input: str) -> str:
+        """Fetch dynamic skill prompts to inject into system prompt."""
+        return await self.store.get_relevant_skills(user_input, top_k=2)
 
 
 # Singleton
