@@ -72,12 +72,12 @@ def build_graph(checkpointer=None):
     Build and compile the LangGraph StateGraph.
     
     Flow:
-        START → router → agent → (conditional)
+        START → agent → (conditional)
                                    ├→ human_approval → (conditional)
                                    │                    ├→ agent (edit)
-                                   │                    └→ synthesizer
+                                   │                    └→ END
                                    ├→ agent (retry)
-                                   └→ synthesizer → END
+                                   └→ END
     """
     builder = StateGraph(AgentState)
 
@@ -108,5 +108,28 @@ def build_graph(checkpointer=None):
 # 4. Graph Instance (with SQLite checkpointer)
 # ==========================================================
 
-# The checkpointer is initialized asynchronously in app.py startup
-# This module exports the builder function, not a pre-built graph
+import os
+from pathlib import Path
+
+# Default path — can be overridden via the DB_PATH env var
+_DEFAULT_DB_PATH = os.getenv("DB_PATH", "./data/checkpoints.db")
+
+
+def checkpointer_context(db_path: str = _DEFAULT_DB_PATH):
+    """
+    Return an async context manager that opens an AsyncSqliteSaver.
+
+    Usage (in FastAPI lifespan)::
+
+        async with checkpointer_context() as cp:
+            graph = build_graph(checkpointer=cp)
+            yield  # serve requests
+        # connection is closed automatically on exit
+
+    Args:
+        db_path: Path to the SQLite file.  The parent directory is
+                 created automatically if it does not exist.
+    """
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    logger.info(f"📂 SQLite checkpointer will use → {db_path}")
+    return AsyncSqliteSaver.from_conn_string(db_path)

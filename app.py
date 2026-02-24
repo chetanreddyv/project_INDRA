@@ -16,12 +16,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
 from config.settings import settings
 from telegram import TelegramClient
-from graph import build_graph
+from graph import build_graph, checkpointer_context
 
 # ── Logging ──────────────────────────────────────────────────
 logging.basicConfig(
@@ -50,14 +49,6 @@ async def lifespan(app: FastAPI):
     telegram_client = TelegramClient(settings.telegram_bot_token)
     logger.info("✅ Telegram client initialized")
 
-    # Initialize checkpointer (in-memory, persists for session lifetime)
-    checkpointer = MemorySaver()
-    logger.info("✅ MemorySaver checkpointer initialized")
-
-    # Build and compile the LangGraph
-    graph = build_graph(checkpointer=checkpointer)
-    logger.info("✅ LangGraph compiled")
-
     # Initialize MemoryGate
     try:
         from memory import memorygate
@@ -68,20 +59,29 @@ async def lifespan(app: FastAPI):
 
     logger.info(f"✅ Allowed chat IDs: {settings.allowed_chat_id_list}")
 
-    # Delete any existing webhook and start polling for local dev
-    await telegram_client.delete_webhook()
-    logger.info("✅ Webhook cleared — using polling mode")
+    # Open the SQLite checkpointer for the full lifespan of the app
+    async with checkpointer_context() as checkpointer:
+        # Build and compile the LangGraph with the persistent checkpointer
+        graph = build_graph(checkpointer=checkpointer)
+        logger.info("✅ LangGraph compiled with SQLite checkpointer")
 
-    # Start polling in background
-    polling_task = asyncio.create_task(_poll_telegram())
-    logger.info("🟢 Personal Assistant is ready! (polling mode)")
+        # Delete any existing webhook and start polling for local dev
+        await telegram_client.delete_webhook()
+        logger.info("✅ Webhook cleared — using polling mode")
 
-    yield
+        # Start polling in background
+        polling_task = asyncio.create_task(_poll_telegram())
+        logger.info("🟢 Personal Assistant is ready! (polling mode)")
 
-    # Shutdown
-    logger.info("🔴 Shutting down...")
-    polling_task.cancel()
-    await telegram_client.close()
+        yield
+
+        # Shutdown
+        logger.info("🔴 Shutting down...")
+        polling_task.cancel()
+        await telegram_client.close()
+    # SQLite connection is closed automatically when the async with block exits
+    logger.info("✅ SQLite checkpointer closed")
+
 
 
 # ==========================================================
