@@ -15,7 +15,7 @@ load_dotenv()
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from langgraph.types import Command
 
 from config.settings import settings
@@ -158,10 +158,14 @@ async def _poll_telegram():
 
 app = FastAPI(
     title="Personal AI Assistant",
-    description="Agentic personal assistant via Telegram",
+    description="Agentic personal assistant via Telegram & Web",
     version="0.1.0",
     lifespan=lifespan,
 )
+
+# Mount web chat UI
+from web_chat import router as chat_router
+app.include_router(chat_router)
 
 
 # ==========================================================
@@ -400,7 +404,96 @@ async def _run_memorygate(thread_id: str, user_input: str, agent_response: str):
 
 
 # ==========================================================
-# 7. Entrypoint
+# 7. Web Chat API Handlers
+# ==========================================================
+
+@app.post("/api/chat")
+async def web_chat_send(request: Request):
+    """
+    Web chat endpoint — runs the LangGraph and returns the result as JSON.
+    Supports the same HITL flow as Telegram.
+    """
+    if not graph:
+        return JSONResponse({"error": "Graph not initialized"}, status_code=503)
+
+    body = await request.json()
+    user_input = body.get("message", "").strip()
+    thread_id = body.get("thread_id", "web_default")
+
+    if not user_input:
+        return JSONResponse({"error": "Empty message"})
+
+    logger.info(f"🌐 Web chat from {thread_id}: {user_input[:100]}")
+
+    config = {"configurable": {"thread_id": thread_id}}
+    try:
+        async for event in graph.astream(
+            {
+                "chat_id": thread_id,
+                "user_input": user_input,
+                "tool_failure_count": 0,
+            },
+            config=config,
+            stream_mode="updates",
+        ):
+            pass
+
+        state = await graph.aget_state(config)
+
+        if state.next:
+            # Graph is paused — HITL approval needed
+            interrupted = state.tasks[0].interrupts[0].value
+            return JSONResponse({
+                "approval_required": True,
+                "action": interrupted.get("action", "unknown"),
+                "details": interrupted.get("details", ""),
+                "tool_args": interrupted.get("tool_args", {}),
+            })
+        else:
+            # Graph completed
+            response = state.values.get("agent_response", "Done!")
+            asyncio.create_task(_run_memorygate(thread_id, user_input, response))
+            return JSONResponse({"response": response})
+
+    except Exception as e:
+        logger.error(f"❌ Web chat error: {e}", exc_info=True)
+        return JSONResponse({"error": str(e)[:500]})
+
+
+@app.post("/api/chat/approve")
+async def web_chat_approve(request: Request):
+    """
+    Web chat HITL approval — resumes the paused graph.
+    """
+    if not graph:
+        return JSONResponse({"error": "Graph not initialized"}, status_code=503)
+
+    body = await request.json()
+    decision = body.get("decision", "reject")
+    thread_id = body.get("thread_id", "web_default")
+
+    logger.info(f"🌐 Web approval: {decision} for thread {thread_id}")
+
+    config = {"configurable": {"thread_id": thread_id}}
+    try:
+        async for event in graph.astream(
+            Command(resume=decision),
+            config=config,
+            stream_mode="updates",
+        ):
+            pass
+
+        state = await graph.aget_state(config)
+        response = state.values.get("agent_response", "Done!")
+        return JSONResponse({"response": response})
+
+    except Exception as e:
+        logger.error(f"❌ Web approval error: {e}", exc_info=True)
+        return JSONResponse({"error": str(e)[:500]})
+
+
+# ==========================================================
+# 8. Entrypoint
 # ==========================================================
 
 if __name__ == "__main__":
