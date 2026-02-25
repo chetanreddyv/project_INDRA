@@ -83,6 +83,11 @@ async def lifespan(app: FastAPI):
         graph = build_graph(checkpointer=checkpointer)
         logger.info("✅ LangGraph compiled with SQLite checkpointer")
 
+        # Start Cron Manager
+        from core.cron_manager import cron_manager
+        await cron_manager.start()
+        logger.info("✅ Cron scheduler started")
+
         # Delete any existing webhook and start polling for local dev
         await telegram_client.delete_webhook()
         logger.info("✅ Webhook cleared — using polling mode")
@@ -95,6 +100,7 @@ async def lifespan(app: FastAPI):
 
         # Shutdown
         logger.info("🔴 Shutting down...")
+        await cron_manager.stop()
         polling_task.cancel()
         await telegram_client.close()
         try:
@@ -305,8 +311,13 @@ async def _run_graph(chat_id: int, user_input: str):
         else:
             # Graph completed — send response
             response = state.values.get("agent_response", "Done!")
-            await telegram_client.send_message(chat_id=chat_id, text=response)
-            logger.info(f"💬 Sent response to {chat_id}")
+            
+            # Suppress routine heartbeat output
+            if response.strip() != "HEARTBEAT_OK":
+                await telegram_client.send_message(chat_id=chat_id, text=response)
+                logger.info(f"💬 Sent response to {chat_id}")
+            else:
+                logger.info(f"🔇 Suppressed HEARTBEAT_OK from {chat_id}")
 
             # Trigger memorygate in background
             import asyncio

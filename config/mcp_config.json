@@ -34,5 +34,19 @@
             "web_fetch"
         ],
         "write_actions": []
+    },
+    "cron": {
+        "description": "Schedule routine background tasks and isolated jobs",
+        "enabled": true,
+        "module": "cron_tools",
+        "tools": [
+            "cron_add",
+            "cron_list",
+            "cron_remove"
+        ],
+        "write_actions": [
+            "cron_add",
+            "cron_remove"
+        ]
     }
 }
