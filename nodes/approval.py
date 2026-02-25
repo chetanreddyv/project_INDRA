@@ -49,7 +49,9 @@ def _get_tool_registry() -> dict:
         return {}
 
 
-def _execute_tool(action_name: str, tool_args: dict) -> str:
+import inspect
+
+async def _execute_tool(action_name: str, tool_args: dict) -> str:
     """
     Execute a tool by name with the given arguments.
     Returns the tool's string result or an error message.
@@ -62,8 +64,10 @@ def _execute_tool(action_name: str, tool_args: dict) -> str:
     try:
         logger.info(f"  -> Executing {action_name}({tool_args})")
         result = func(**tool_args)
+        if inspect.isawaitable(result):
+            result = await result
         logger.info(f"  -> {action_name} completed successfully")
-        return result
+        return str(result)
     except Exception as e:
         logger.error(f"  -> {action_name} failed: {e}")
         return f"Error executing {action_name}: {e}"
@@ -111,7 +115,7 @@ async def human_approval_node(state: dict) -> dict:
 
     if decision == "approve":
         # ── Execute the real tool programmatically ──────────────────
-        result = _execute_tool(action_name, tool_args)
+        result = await _execute_tool(action_name, tool_args)
         args_lines = "\n".join(f"  • {k}: {v}" for k, v in tool_args.items())
         response = (
             f"✅ Action Approved & Executed\n\n"

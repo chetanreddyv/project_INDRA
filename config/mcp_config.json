@@ -48,5 +48,18 @@
             "cron_add",
             "cron_remove"
         ]
+    },
+    "exec": {
+        "description": "Execute terminal commands and manage background processes",
+        "enabled": true,
+        "module": "exec_tools",
+        "tools": [
+            "exec",
+            "process"
+        ],
+        "write_actions": [
+            "exec",
+            "process"
+        ]
     }
 }
