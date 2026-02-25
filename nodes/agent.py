@@ -201,14 +201,14 @@ async def agent_node(state: dict) -> dict:
     # ── Create agent ────────────────────────────────────────────────
     agent = Agent(
         "google-gla:gemini-2.5-flash",
-        system_prompt=full_system_prompt,
-        output_type=AgentResponse,
+        system_prompt=full_system_prompt + "\n\nALWAYS format your output using standard Markdown (use *, _, `, ```, lists). Do NOT use HTML tags. Respond directly to the user.",
+        output_type=str,
         tools=all_tools,
     )
 
     try:
         result = await agent.run(user_input)
-        response_text = result.output.response
+        response_text = result.output
 
         logger.info(f"  -> Agent response generated ({len(response_text)} chars)")
         return {

@@ -35,25 +35,33 @@ def web_search(query: str, max_results: int = 5) -> str:
     try:
         results = []
         with DDGS() as ddgs:
-            # We use text(), which is the standard text search
-            for r in ddgs.text(query, max_results=max_results):
-                results.append(r)
+            # text() is standard search. It returns an iterator.
+            # We wrap in a try-catch per-iteration in case DDGS throws a rate limit halfway.
+            try:
+                for r in ddgs.text(query, max_results=max_results):
+                    results.append(r)
+            except Exception as inner_e:
+                logger.warning(f"DDGS interrupted during fetch: {inner_e}")
                 
         if not results:
-            return f"No results found for query: '{query}'"
+            return f"No results found for query: '{query}'. Try a shorter, more keyword-focused query."
             
         lines = [f"Search results for '{query}':\n"]
-        for res in results:
+        for i, res in enumerate(results, start=1):
             title = res.get("title", "No Title")
             href = res.get("href", "No URL")
             body = res.get("body", "No Snippet")
-            lines.append(f"### [{title}]({href})\n{body}\n")
+            # Truncate overly long bodies just in case
+            if len(body) > 500:
+                body = body[:500] + "..."
+            lines.append(f"### {i}. [{title}]({href})\n{body}\n")
             
-        logger.info(f"✅ web_search returned {len(results)} results")
-        return "\n".join(lines)
+        out_str = "\n".join(lines)
+        logger.info(f"✅ web_search returned {len(results)} results ({len(out_str)} chars)")
+        return out_str
     except Exception as e:
         logger.error(f"❌ web_search error: {e}")
-        return f"Error executing search: {e}"
+        return f"Error executing search: {e}. The search engine might be rate-limiting. Try asking the user for a different query, or try using web_fetch on a known URL instead."
 
 
 def web_fetch(url: str) -> str:
