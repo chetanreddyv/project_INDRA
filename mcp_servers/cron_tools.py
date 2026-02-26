@@ -3,7 +3,7 @@ from core.cron_manager import CronSchedule, cron_manager
 
 logger = logging.getLogger("mcp.cron_tools")
 
-def cron_add(name: str, schedule_type: str, schedule_value: str, target: str, command: str, delivery_mode: str = "silent") -> str:
+def cron_add(name: str, schedule_type: str, schedule_value: str, target: str, command: str, delivery_mode: str) -> str:
     """
     Add a new scheduled cron job.
     
@@ -11,9 +11,9 @@ def cron_add(name: str, schedule_type: str, schedule_value: str, target: str, co
         name: A human readable name for the job
         schedule_type: "at" (ISO 8601), "every" (milliseconds as string), or "cron" (e.g. "* * * * *")
         schedule_value: The value for the schedule_type specified
-        target: "main" (system_event) or "isolated" (agent_turn)
+        target: "main" (system_event) or "isolated" (agent_turn).
         command: The instruction for the agent to execute
-        delivery_mode: "silent" (no output), "announce" (output to main channels)
+        delivery_mode: "silent" (no output) or "announce" (output to main channels). You MUST explicitly provide "silent" or "announce".
     
     Returns:
         The ID of the created job, or an error message.

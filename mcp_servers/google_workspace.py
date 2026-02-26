@@ -121,15 +121,21 @@ def _resolve_label_id(service, label_id_or_name: str) -> str:
 # Gmail Tools
 # ══════════════════════════════════════════════════════════════
 
-def list_messages(max_results: int = 10, query: str = "", include_spam_trash: bool = False) -> str:
-    """List Gmail messages. `query` uses standard Gmail search syntax (e.g. 'from:someone@example.com is:unread')."""
+def list_messages(max_results: int, query: str, include_spam_trash: bool) -> str:
+    """List Gmail messages.
+    
+    Args:
+        max_results: Maximum number of messages to return. You MUST provide a reasonable integer, e.g., 10.
+        query: Standard Gmail search syntax (e.g. 'from:someone@example.com is:unread'). You MUST pass an empty string '' if no filter is needed.
+        include_spam_trash: Whether to include spam and trash. You MUST provide True or False explicitly.
+    """
     logger.info(f"🛠️ list_messages(max_results={max_results}, query='{query}')")
     try:
         service = _get_gmail_service()
         resp = service.users().messages().list(
             userId="me",
             maxResults=max_results,
-            q=query or None,
+            q=query if query else None,
             includeSpamTrash=include_spam_trash,
         ).execute()
 
@@ -160,7 +166,11 @@ def list_messages(max_results: int = 10, query: str = "", include_spam_trash: bo
 
 
 def get_message(message_id: str) -> str:
-    """Fetch a single email by message ID and return headers + body."""
+    """Fetch a single email by message ID and return headers + body.
+    
+    Args:
+        message_id: The exact ID of the message to retrieve.
+    """
     logger.info(f"🛠️ get_message(message_id='{message_id}')")
     try:
         service = _get_gmail_service()
@@ -191,21 +201,15 @@ def get_message(message_id: str) -> str:
         return f"Error getting message: {e}"
 
 
-def send_email(
-    to: str,
-    subject: str,
-    body: str,
-    cc: str = "",
-    bcc: str = "",
-) -> str:
+def send_email(to: str, subject: str, body: str, cc: str, bcc: str) -> str:
     """Send an email via Gmail.
 
     Args:
-        to: Recipient email address.
+        to: Primary recipient email address.
         subject: Email subject line.
         body: Email body text.
-        cc: Optional CC recipients (comma-separated).
-        bcc: Optional BCC recipients (comma-separated).
+        cc: Optional CC recipients (comma-separated). You MUST pass an empty string '' if there are no CCs.
+        bcc: Optional BCC recipients (comma-separated). You MUST pass an empty string '' if there are no BCCs.
     """
     logger.info(f"🛠️ send_email(to='{to}', subject='{subject}')")
     try:
@@ -213,9 +217,9 @@ def send_email(
         msg = MIMEText(body, _subtype="plain", _charset="utf-8")
         msg["to"] = to
         msg["subject"] = subject
-        if cc:
+        if cc.strip():
             msg["cc"] = cc
-        if bcc:
+        if bcc.strip():
             msg["bcc"] = bcc
 
         raw = _b64url_encode(msg.as_bytes())
@@ -229,7 +233,11 @@ def send_email(
 
 
 def mark_read(message_id: str) -> str:
-    """Mark a Gmail message as read."""
+    """Mark a Gmail message as read.
+    
+    Args:
+        message_id: The exact ID of the message to mark read.
+    """
     try:
         service = _get_gmail_service()
         service.users().messages().modify(
@@ -242,7 +250,11 @@ def mark_read(message_id: str) -> str:
 
 
 def mark_unread(message_id: str) -> str:
-    """Mark a Gmail message as unread."""
+    """Mark a Gmail message as unread.
+    
+    Args:
+        message_id: The exact ID of the message to mark unread.
+    """
     try:
         service = _get_gmail_service()
         service.users().messages().modify(
@@ -255,7 +267,7 @@ def mark_unread(message_id: str) -> str:
 
 
 def list_labels() -> str:
-    """List all Gmail labels."""
+    """List all available Gmail labels."""
     try:
         service = _get_gmail_service()
         resp = service.users().labels().list(userId="me").execute()
@@ -271,7 +283,12 @@ def list_labels() -> str:
 
 
 def add_label(message_id: str, label: str) -> str:
-    """Add a label to a Gmail message (by label name or ID)."""
+    """Add a label to a Gmail message (by label name or ID).
+    
+    Args:
+        message_id: The ID of the message.
+        label: The label ID or name.
+    """
     try:
         service = _get_gmail_service()
         label_id = _resolve_label_id(service, label)
@@ -285,7 +302,12 @@ def add_label(message_id: str, label: str) -> str:
 
 
 def remove_label(message_id: str, label: str) -> str:
-    """Remove a label from a Gmail message (by label name or ID)."""
+    """Remove a label from a Gmail message (by label name or ID).
+    
+    Args:
+        message_id: The ID of the message.
+        label: The label ID or name.
+    """
     try:
         service = _get_gmail_service()
         label_id = _resolve_label_id(service, label)
@@ -302,11 +324,11 @@ def remove_label(message_id: str, label: str) -> str:
 # Calendar Tools
 # ══════════════════════════════════════════════════════════════
 
-def list_events(max_results: int = 10) -> str:
+def list_events(max_results: int) -> str:
     """List upcoming Google Calendar events.
 
     Args:
-        max_results: Maximum number of events to return (default: 10).
+        max_results: Maximum number of events to return. You MUST explicitly provide a reasonable integer like 10.
     """
     logger.info(f"🛠️ list_events(max_results={max_results})")
     try:
@@ -336,26 +358,21 @@ def list_events(max_results: int = 10) -> str:
         return f"Error listing events: {e}"
 
 
-def create_event(
-    summary: str,
-    start_time: str,
-    end_time: str,
-    description: str = "",
-) -> str:
+def create_event(summary: str, start_time: str, end_time: str, description: str) -> str:
     """Create a new Google Calendar event.
 
     Args:
         summary: Title of the event.
         start_time: Start time in ISO 8601 format (e.g. '2024-03-15T10:00:00').
         end_time: End time in ISO 8601 format.
-        description: Optional description of the event.
+        description: Description of the event. You MUST pass an empty string '' if no description is needed.
     """
     logger.info(f"🛠️ create_event(summary='{summary}', start='{start_time}')")
     try:
         service = _get_calendar_service()
         event = {
             "summary": summary,
-            "description": description,
+            "description": description if description.strip() else "",
             "start": {"dateTime": start_time, "timeZone": "UTC"},
             "end": {"dateTime": end_time, "timeZone": "UTC"},
         }
@@ -367,28 +384,27 @@ def create_event(
         return f"Error creating event: {e}"
 
 
-def create_meeting(
-    summary: str,
-    start_time: str,
-    end_time: str,
-    attendees: List[str] = [],
-    description: str = "",
-) -> str:
+def create_meeting(summary: str, start_time: str, end_time: str, attendees_csv: str, description: str) -> str:
     """Create a Google Calendar event with a Google Meet link.
 
     Args:
         summary: Title of the meeting.
         start_time: Start time in ISO 8601 format.
         end_time: End time in ISO 8601 format.
-        attendees: List of email addresses to invite.
-        description: Optional description of the meeting.
+        attendees_csv: Comma-separated list of email addresses to invite. You MUST pass an empty string '' if no attendees.
+        description: Description of the meeting. You MUST pass an empty string '' if no description is needed.
     """
     logger.info(f"🛠️ create_meeting(summary='{summary}')")
     try:
         service = _get_calendar_service()
+        
+        attendee_list = []
+        if attendees_csv.strip():
+            attendee_list = [{"email": email.strip()} for email in attendees_csv.split(",") if email.strip()]
+
         event = {
             "summary": summary,
-            "description": description,
+            "description": description if description.strip() else "",
             "start": {"dateTime": start_time, "timeZone": "UTC"},
             "end": {"dateTime": end_time, "timeZone": "UTC"},
             "conferenceData": {
@@ -397,7 +413,7 @@ def create_meeting(
                     "conferenceSolutionKey": {"type": "hangoutsMeet"},
                 }
             },
-            "attendees": [{"email": email} for email in attendees],
+            "attendees": attendee_list,
         }
         created = service.events().insert(
             calendarId="primary", body=event, conferenceDataVersion=1,

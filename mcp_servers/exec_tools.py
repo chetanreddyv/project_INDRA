@@ -54,30 +54,35 @@ _SESSIONS: Dict[str, ProcessSession] = {}
 
 async def execute_command(
     command: str,
-    workdir: str = None,
-    env: dict = None,
-    yieldMs: int = 10000,
-    background: bool = False,
-    timeout: int = 1800,
-    **kwargs
+    workdir: str,
+    env_json: str,
+    yieldMs: int,
+    background: bool,
+    timeout: int
 ) -> str:
     """
     Run a shell command in the workspace.
     
     Args:
         command: The shell command to execute.
-        workdir: Working directory (defaults to current cwd).
-        env: key/value overrides for environment variables.
-        yieldMs: Delay in ms before auto-backgrounding (default 10000).
-        background: If True, background immediately and return sessionId.
-        timeout: Execution timeout in seconds (default 1800).
+        workdir: Working directory. You MUST pass an empty string '' to use the current working directory.
+        env_json: JSON string of key/value string pairs for environment variables. You MUST pass an empty string '' if no env overrides.
+        yieldMs: Delay in ms before auto-backgrounding. You MUST provide a sensible integer, like 10000.
+        background: If True, background immediately and return sessionId. You MUST provide True or False.
+        timeout: Execution timeout in seconds. You MUST provide 1800 if unsure.
     """
     logger.info(f"🛠️ exec(command='{command[:50]}...', background={background})")
     
-    workdir = workdir or os.getcwd()
+    workdir = workdir if workdir.strip() else os.getcwd()
     run_env = os.environ.copy()
-    if env:
-        run_env.update(env)
+    if env_json.strip():
+        import json
+        try:
+            parsed_env = json.loads(env_json)
+            if isinstance(parsed_env, dict):
+                run_env.update(parsed_env)
+        except json.JSONDecodeError:
+            logger.warning("Failed to parse env_json in exec_tools")
 
     try:
         proc = await asyncio.create_subprocess_shell(
@@ -115,15 +120,15 @@ async def execute_command(
             f"Use the process tool with action='poll' and sessionId='{session_id}' to check status."
         )
 
-async def process_action(action: str, sessionId: str, keys: list[str] = None, text: str = None) -> str:
+async def process_action(action: str, sessionId: str, keys_csv: str, text: str) -> str:
     """
     Interact with a background process session.
     
     Args:
         action: One of 'poll', 'send-keys', 'submit', 'paste', 'kill'.
         sessionId: The ID of the session to interact with.
-        keys: List of keys to send (for send-keys).
-        text: Text to paste (for paste).
+        keys_csv: Comma-separated list of keys to send (for send-keys). You MUST pass an empty string '' if no keys.
+        text: Text to paste (for paste). You MUST pass an empty string '' if pasting no text.
     """
     logger.info(f"🛠️ process(action='{action}', sessionId='{sessionId}')")
     
@@ -172,11 +177,12 @@ async def process_action(action: str, sessionId: str, keys: list[str] = None, te
     elif action == "send-keys":
          if session.is_done:
             return "Session is already done."
-         if not keys:
-             return "Error: keys argument required for send-keys."
+         if not keys_csv.strip():
+             return "Error: keys_csv argument required for send-keys."
          
          # Basic mapping for common terminal sequences
          try:
+             keys = [k.strip() for k in keys_csv.split(",") if k.strip()]
              for key in keys:
                  if key == "Enter" or key == "Return":
                      session.process.stdin.write(b'\n')

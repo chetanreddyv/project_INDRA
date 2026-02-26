@@ -7,14 +7,16 @@ and callback query acknowledgement.
 
 import httpx
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any
+
+from interfaces.base import ClientInterface
 
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}"
 
 
-class TelegramClient:
+class TelegramClient(ClientInterface):
     """Async Telegram Bot API wrapper."""
 
     def __init__(self, token: str):
@@ -42,13 +44,25 @@ class TelegramClient:
             logger.error(f"Telegram API error: {data}")
         return data
 
-    # ── Messaging ─────────────────────────────────────────────
+    # ── ClientInterface Implementation ────────────────────────
 
-    async def send_message(
+    async def send_message(self, thread_id: str, content: str) -> None:
+        """Pushes a standard text message to the client (Telegram chat)."""
+        await self._send_telegram_message(int(thread_id), content, parse_mode="HTML")
+
+    async def request_approval(self, thread_id: str, tool_name: str, args: Dict[str, Any]) -> None:
+        """Pushes an interactive approval request (UI buttons) to the client."""
+        args_text = "\n".join(f"  • *{k}*: `{v}`" for k, v in args.items()) if args else "  (No arguments)"
+        action_summary = f"*Action:* `{tool_name}`\n\n*Arguments:*\n{args_text}"
+        await self.send_approval_buttons(int(thread_id), action_summary, thread_id)
+
+    # ── Telegram-Specific Messaging ───────────────────────────
+
+    async def _send_telegram_message(
         self,
         chat_id: int,
         text: str,
-        parse_mode: Optional[str] = "Markdown",
+        parse_mode: Optional[str] = "HTML",
         reply_markup: Optional[dict] = None,
     ) -> dict:
         """Send a text message. Splits into chunks if > 4096 chars."""
@@ -61,7 +75,7 @@ class TelegramClient:
                 return await self._call("sendMessage", **kwargs)
             except httpx.HTTPStatusError as e:
                 if parse_mode and e.response.status_code == 400:
-                    logger.warning(f"Markdown parse failed, retrying without parse_mode: {e}")
+                    logger.warning(f"Parse failed, retrying without parse_mode: {e}")
                     kwargs.pop("parse_mode", None)
                     return await self._call("sendMessage", **kwargs)
                 raise
@@ -78,7 +92,7 @@ class TelegramClient:
                 result = await self._call("sendMessage", **kwargs)
             except httpx.HTTPStatusError as e:
                 if parse_mode and e.response.status_code == 400:
-                    logger.warning(f"Markdown parse failed for chunk, retrying without parse_mode: {e}")
+                    logger.warning(f"Parse failed for chunk, retrying without parse_mode: {e}")
                     kwargs.pop("parse_mode", None)
                     result = await self._call("sendMessage", **kwargs)
                 else:
@@ -117,7 +131,7 @@ class TelegramClient:
                 ],
             ]
         }
-        return await self.send_message(
+        return await self._send_telegram_message(
             chat_id=chat_id,
             text=text,
             parse_mode="Markdown",

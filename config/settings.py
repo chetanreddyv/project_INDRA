@@ -4,6 +4,15 @@ config/settings.py — Centralized configuration via Pydantic Settings.
 All env vars are loaded from .env and validated at startup.
 """
 
+import os
+import logging
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Configure basic logging level globally
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+
 from pydantic_settings import BaseSettings
 from pydantic import Field
 from typing import Optional

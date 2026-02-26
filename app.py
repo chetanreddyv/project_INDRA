@@ -481,73 +481,125 @@ async def _run_memorygate(thread_id: str, user_input: str, agent_response: str):
         logger.error(f"Memorygate error: {e}", exc_info=True)
 
 
-# ==========================================================
-# 7. Web Chat API Handlers
-# ==========================================================
-
-@app.post("/api/chat")
-async def web_chat_send(request: Request):
+@app.post("/api/v1/chat/{thread_id}")
+async def chat_endpoint(thread_id: str, request: Request):
     """
-    Web chat endpoint — runs the LangGraph and returns the result as JSON.
-    Supports the same HITL flow as Telegram.
-    Enqueued via LaneManager to avoid race conditions.
+    Standardized Gateway API for chat clients.
+    Accepts generic POST requests and runs the LangGraph deterministically.
     """
     if not graph:
         return JSONResponse({"error": "Graph not initialized"}, status_code=503)
 
     body = await request.json()
-    user_input = body.get("message", "").strip()
-    thread_id = body.get("thread_id", "web_default")
-
+    user_input = body.get("user_input", "").strip()
     if not user_input:
-        return JSONResponse({"error": "Empty message"})
+        return JSONResponse({"error": "Empty message"}, status_code=400)
 
-    logger.info(f"🌐 Web chat from {thread_id}: {user_input[:100]}")
+    logger.info(f"🌐 Gateway API request from {thread_id}: {user_input[:100]}")
 
-    msg = StandardMessage(
-        platform="web",
-        user_id=thread_id,
-        text=user_input
-    )
+    config = {"configurable": {"thread_id": thread_id}}
+    state_updates = {
+        "chat_id": thread_id,
+        "user_input": user_input,
+        "tool_failure_count": 0,
+    }
 
-    # Enqueue execution and await the future so we can respond to the HTTP request
-    future = await lane_manager.submit(thread_id, agent_daemon, msg)
     try:
-        result = await future
-        return JSONResponse(result)
+        # Run the graph until it finishes or hits an interrupt()
+        result = await graph.ainvoke(state_updates, config=config)
+        
+        # Check if the graph paused due to a HITL interrupt()
+        state_snapshot = await graph.aget_state(config)
+        
+        if state_snapshot.next:
+            # The graph is paused waiting for user input!
+            pending_action = state_snapshot.tasks[0].interrupts[0].value
+            return {
+                "status": "requires_approval",
+                "pending_tool": pending_action
+            }
+            
+        # Otherwise, the graph finished successfully
+        # Extract the semantic response
+        messages = result.get("messages", [])
+        response_text = "Done!"
+        if messages:
+            last_msg = messages[-1]
+            if hasattr(last_msg, "content"):
+                if isinstance(last_msg.content, str) and last_msg.content:
+                    response_text = last_msg.content
+                elif isinstance(last_msg.content, list):
+                    texts = [item.get("text", "") for item in last_msg.content if isinstance(item, dict) and "text" in item]
+                    if texts:
+                        response_text = "\n".join(texts)
+                        
+        # Trigger memory extraction in the background
+        import asyncio
+        asyncio.create_task(_run_memorygate(thread_id, user_input, response_text))
+
+        return {
+            "status": "completed",
+            "response": response_text
+        }
+        
     except Exception as e:
-        logger.error(f"❌ Web chat error: {e}", exc_info=True)
-        return JSONResponse({"error": str(e)[:500]})
+        logger.error(f"❌ Gateway API error: {e}", exc_info=True)
+        return JSONResponse({"error": str(e)[:500]}, status_code=500)
 
 
-@app.post("/api/chat/approve")
-async def web_chat_approve(request: Request):
+@app.post("/api/v1/chat/{thread_id}/resume")
+async def resume_hitl_endpoint(thread_id: str, request: Request):
     """
-    Web chat HITL approval — resumes the paused graph.
-    Enqueued via LaneManager.
+    Standardized Gateway API for resuming paused execution.
+    Injects a HITL decision (approve/reject/edit) into the paused graph.
     """
     if not graph:
         return JSONResponse({"error": "Graph not initialized"}, status_code=503)
 
     body = await request.json()
-    decision = body.get("decision", "reject")
-    thread_id = body.get("thread_id", "web_default")
+    decision = body.get("action", body.get("decision", "reject")) # accept either for back-compat
+    feedback = body.get("feedback", "")
 
-    logger.info(f"🌐 Web approval: {decision} for thread {thread_id}")
+    logger.info(f"🌐 Gateway API resume: {decision} for thread {thread_id}")
 
-    msg = ResumeMessage(
-        platform="web",
-        user_id=thread_id,
-        decision=decision
-    )
+    config = {"configurable": {"thread_id": thread_id}}
 
-    future = await lane_manager.submit(thread_id, resume_daemon, msg)
     try:
-        result = await future
-        return JSONResponse(result)
+        # Verify the graph is actually paused
+        state_snapshot = await graph.aget_state(config)
+        if not state_snapshot.next:
+            return JSONResponse({"error": "No pending actions for this thread."}, status_code=400)
+            
+        # For simplicity, if feedback exists and it's an edit, we can pass it
+        # But our simple approval node currently just takes the string action "approve" "reject" "edit"
+        # Since Telegram sends "approve", we will invoke with the string decision directly.
+        
+        result = await graph.ainvoke(Command(resume=decision), config=config)
+        
+        # Check if it paused again (unlikely unless edit loops back)
+        new_snapshot = await graph.aget_state(config)
+        if new_snapshot.next:
+            return {
+                "status": "requires_approval", 
+                "pending_tool": new_snapshot.tasks[0].interrupts[0].value
+            }
+            
+        messages = result.get("messages", [])
+        response_text = "Done!"
+        if messages:
+            last_msg = messages[-1]
+            if hasattr(last_msg, "content"):
+                if isinstance(last_msg.content, str) and last_msg.content:
+                    response_text = last_msg.content
+
+        return {
+            "status": "completed",
+            "response": response_text
+        }
+        
     except Exception as e:
-        logger.error(f"❌ Web approval error: {e}", exc_info=True)
-        return JSONResponse({"error": str(e)[:500]})
+        logger.error(f"❌ Gateway resume error: {e}", exc_info=True)
+        return JSONResponse({"error": str(e)[:500]}, status_code=500)
 
 
 # ==========================================================
