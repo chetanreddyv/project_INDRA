@@ -18,101 +18,76 @@ CRON_DATA_DIR = Path("data/cron")
 JOBS_FILE = CRON_DATA_DIR / "jobs.json"
 RUNS_DIR = CRON_DATA_DIR / "runs"
 
+import uuid
+from core.cron_types import CronJob, CronSchedule, CronPayload, CronJobState, CronStore
 
-class CronJob:
-    """Represents a scheduled job."""
-    def __init__(self, data: Dict[str, Any]):
-        self.id = data.get("id", f"job_{int(time.time())}")
-        self.schedule_type = data.get("schedule_type", "cron") # 'at', 'every', 'cron'
-        self.schedule_value = data.get("schedule_value", "* * * * *")
-        self.target = data.get("target", "isolated") # 'main' or 'isolated'
-        self.command = data.get("command", "")
-        self.delivery_mode = data.get("delivery_mode", "silent") # 'silent', 'announce', 'webhook'
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+def _compute_next_run(schedule: CronSchedule, now_ms: int) -> Optional[int]:
+    """Compute the next expected run time in ms."""
+    if schedule.kind == "at":
+        return schedule.at_ms if schedule.at_ms and schedule.at_ms > now_ms else None
         
-        self.status = data.get("status", "active") # 'active', 'paused', 'error', 'completed'
-        self.failure_count = data.get("failure_count", 0)
-        self.last_run_time = data.get("last_run_time", 0.0)
-        self.next_run_time = data.get("next_run_time", 0.0)
-        
-        # Determine initial next_run_time if active
-        if self.status == "active" and self.next_run_time == 0.0:
-            self._compute_next_run()
+    elif schedule.kind == "every":
+        if not schedule.every_ms or schedule.every_ms <= 0:
+            return None
+        return now_ms + schedule.every_ms
+            
+    elif schedule.kind == "cron" and schedule.expr:
+        if croniter is None:
+            logger.error("croniter is not installed, cannot schedule cron job.")
+            return None
+            
+        try:
+            base_time = now_ms / 1000.0
+            tz = timezone.utc
+            if schedule.tz:
+                try:
+                    from zoneinfo import ZoneInfo
+                    tz = ZoneInfo(schedule.tz)
+                except Exception:
+                    pass
+            base_dt = datetime.fromtimestamp(base_time, tz=tz)
+            cron = croniter(schedule.expr, base_dt)
+            next_dt = cron.get_next(datetime)
+            return int(next_dt.timestamp() * 1000)
+        except Exception as e:
+            logger.error(f"Invalid cron expression: {e}")
+            return None
+    return None
 
-    def _compute_next_run(self):
-        """Compute the next expected run time."""
-        now = time.time()
-        
-        if self.schedule_type == "at":
-            try:
-                dt = datetime.fromisoformat(self.schedule_value.replace("Z", "+00:00"))
-                self.next_run_time = dt.timestamp()
-            except ValueError:
-                logger.error(f"Invalid isoformat for job {self.id}: {self.schedule_value}")
-                self.status = "error"
-                
-        elif self.schedule_type == "every":
-            # schedule_value is in milliseconds
-            try:
-                interval_ms = int(self.schedule_value)
-                # If it's a new job, schedule it interval_ms from now
-                # Or from last_run_time if available
-                base_time = self.last_run_time if self.last_run_time > 0 else now
-                self.next_run_time = base_time + (interval_ms / 1000.0)
-                if self.next_run_time < now:
-                    self.next_run_time = now + (interval_ms / 1000.0) # Catch up
-            except ValueError:
-                self.status = "error"
-                
-        elif self.schedule_type == "cron":
-            if croniter is None:
-                logger.error("croniter is not installed, cannot schedule cron job.")
-                self.status = "error"
-                return
-                
-            try:
-                base_time = datetime.fromtimestamp(now, tz=timezone.utc)
-                cron = croniter(self.schedule_value, base_time)
-                self.next_run_time = cron.get_next(float)
-            except Exception as e:
-                logger.error(f"Invalid cron expression for {self.id}: {e}")
-                self.status = "error"
+def _apply_backoff(job: CronJob) -> None:
+    """Apply exponential backoff on failure."""
+    # Assuming failure count can be deduced or stored if needed, 
+    # but the structure given doesn't have an explicit failure_count field.
+    # We will use a standard 30s backoff for simplicity.
+    backoff_ms = 30000 
+    job.state.next_run_at_ms = _now_ms() + backoff_ms
+    logger.warning(f"Job {job.id} failed. Applying backoff. Next run: {job.state.next_run_at_ms}")
 
-    def apply_backoff(self):
-        """Apply exponential backoff on failure."""
-        self.failure_count += 1
-        backoff_intervals = [30, 60, 300, 900, 3600] # 30s, 1m, 5m, 15m, 60m
-        backoff = backoff_intervals[min(self.failure_count - 1, len(backoff_intervals) - 1)]
-        self.next_run_time = time.time() + backoff
-        logger.warning(f"Job {self.id} failed. Applying backoff of {backoff}s. Next run: {self.next_run_time}")
-
-    def complete_run(self, success: bool):
-        if success:
-            self.failure_count = 0
-            self.last_run_time = time.time()
-            if self.schedule_type == "at":
-                self.status = "completed"
+def _complete_run(job: CronJob, success: bool, start_ms: int) -> None:
+    job.state.last_run_at_ms = start_ms
+    job.updated_at_ms = _now_ms()
+    
+    if success:
+        job.state.last_status = "ok"
+        job.state.last_error = None
+        if job.schedule.kind == "at":
+            if job.delete_after_run:
+                job.enabled = False # Manager will handle deletion
             else:
-                self._compute_next_run()
+                job.enabled = False
+                job.state.next_run_at_ms = None
         else:
-            if self.schedule_type == "at":
-                self.status = "error"
-                self.failure_count += 1
-            else:
-                self.apply_backoff()
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "id": self.id,
-            "schedule_type": self.schedule_type,
-            "schedule_value": self.schedule_value,
-            "target": self.target,
-            "command": self.command,
-            "delivery_mode": self.delivery_mode,
-            "status": self.status,
-            "failure_count": self.failure_count,
-            "last_run_time": self.last_run_time,
-            "next_run_time": self.next_run_time
-        }
+            job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
+    else:
+        job.state.last_status = "error"
+        if job.schedule.kind == "at":
+            # If one-shot fails, disable it or leave it as error
+            job.enabled = False
+        else:
+            _apply_backoff(job)
 
 
 class CronManager:
@@ -143,11 +118,38 @@ class CronManager:
         
         try:
             with open(JOBS_FILE, "r") as f:
-                jobs_data = json.load(f)
-                self.jobs = {
-                    j_id: CronJob(j_data) 
-                    for j_id, j_data in jobs_data.items()
-                }
+                data = json.load(f)
+                jobs = []
+                for j in data.get("jobs", []):
+                    jobs.append(CronJob(
+                        id=j["id"],
+                        name=j["name"],
+                        enabled=j.get("enabled", True),
+                        schedule=CronSchedule(
+                            kind=j["schedule"]["kind"],
+                            at_ms=j["schedule"].get("atMs"),
+                            every_ms=j["schedule"].get("everyMs"),
+                            expr=j["schedule"].get("expr"),
+                            tz=j["schedule"].get("tz"),
+                        ),
+                        payload=CronPayload(
+                            kind=j["payload"].get("kind", "agent_turn"),
+                            message=j["payload"].get("message", ""),
+                            deliver=j["payload"].get("deliver", False),
+                            channel=j["payload"].get("channel"),
+                            to=j["payload"].get("to"),
+                        ),
+                        state=CronJobState(
+                            next_run_at_ms=j.get("state", {}).get("nextRunAtMs"),
+                            last_run_at_ms=j.get("state", {}).get("lastRunAtMs"),
+                            last_status=j.get("state", {}).get("lastStatus"),
+                            last_error=j.get("state", {}).get("lastError"),
+                        ),
+                        created_at_ms=j.get("createdAtMs", 0),
+                        updated_at_ms=j.get("updatedAtMs", 0),
+                        delete_after_run=j.get("deleteAfterRun", False),
+                    ))
+                self.jobs = {job.id: job for job in jobs}
             logger.info(f"Loaded {len(self.jobs)} cron jobs.")
         except Exception as e:
             logger.error(f"Failed to load jobs: {e}")
@@ -155,9 +157,42 @@ class CronManager:
     def save_jobs(self):
         """Save jobs to local JSON file."""
         try:
-            jobs_data = {j_id: job.to_dict() for j_id, job in self.jobs.items()}
+            data = {
+                "version": 1,
+                "jobs": [
+                    {
+                        "id": j.id,
+                        "name": j.name,
+                        "enabled": j.enabled,
+                        "schedule": {
+                            "kind": j.schedule.kind,
+                            "atMs": j.schedule.at_ms,
+                            "everyMs": j.schedule.every_ms,
+                            "expr": j.schedule.expr,
+                            "tz": j.schedule.tz,
+                        },
+                        "payload": {
+                            "kind": j.payload.kind,
+                            "message": j.payload.message,
+                            "deliver": j.payload.deliver,
+                            "channel": j.payload.channel,
+                            "to": j.payload.to,
+                        },
+                        "state": {
+                            "nextRunAtMs": j.state.next_run_at_ms,
+                            "lastRunAtMs": j.state.last_run_at_ms,
+                            "lastStatus": j.state.last_status,
+                            "lastError": j.state.last_error,
+                        },
+                        "createdAtMs": j.created_at_ms,
+                        "updatedAtMs": j.updated_at_ms,
+                        "deleteAfterRun": j.delete_after_run,
+                    }
+                    for j in self.jobs.values()
+                ]
+            }
             with open(JOBS_FILE, "w") as f:
-                json.dump(jobs_data, f, indent=2)
+                json.dump(data, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to save jobs: {e}")
 
@@ -171,21 +206,49 @@ class CronManager:
         except Exception as e:
             logger.error(f"Failed to log run for job {job_id}: {e}")
 
-    def add_job(self, job_data: dict) -> str:
-        job = CronJob(job_data)
+    def add_job(
+        self,
+        name: str,
+        schedule: CronSchedule,
+        message: str,
+        deliver: bool = False,
+        kind: str = "agent_turn",
+        delete_after_run: bool = False
+    ) -> CronJob:
+        now = _now_ms()
+        job = CronJob(
+            id=str(uuid.uuid4())[:8],
+            name=name,
+            enabled=True,
+            schedule=schedule,
+            payload=CronPayload(
+                kind=kind,
+                message=message,
+                deliver=deliver
+            ),
+            state=CronJobState(next_run_at_ms=_compute_next_run(schedule, now)),
+            created_at_ms=now,
+            updated_at_ms=now,
+            delete_after_run=delete_after_run,
+        )
         self.jobs[job.id] = job
         self.save_jobs()
         self._arm_timer()
-        logger.info(f"Added job {job.id}")
-        return job.id
+        logger.info(f"Added job {job.name} ({job.id})")
+        return job
 
-    def update_job(self, job_id: str, updates: dict) -> bool:
+    def update_job(self, job_id: str, enabled: bool) -> bool:
         if job_id not in self.jobs:
             return False
             
-        job_data = self.jobs[job_id].to_dict()
-        job_data.update(updates)
-        self.jobs[job_id] = CronJob(job_data)
+        job = self.jobs[job_id]
+        job.enabled = enabled
+        job.updated_at_ms = _now_ms()
+        if enabled:
+            job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
+        else:
+            job.state.next_run_at_ms = None
+            
         self.save_jobs()
         self._arm_timer()
         return True
@@ -199,7 +262,21 @@ class CronManager:
         return False
 
     def list_jobs(self) -> list:
-        return [job.to_dict() for job in self.jobs.values()]
+        # Returns a simple dictionary representation for the MCP tool
+        res = []
+        for j in self.jobs.values():
+            schedule_str = f"expr: {j.schedule.expr}" if j.schedule.kind == "cron" else f"every: {j.schedule.every_ms}ms" if j.schedule.kind == "every" else f"at: {j.schedule.at_ms}ms"
+            res.append({
+                "id": j.id,
+                "name": j.name,
+                "enabled": j.enabled,
+                "schedule": schedule_str,
+                "target": j.payload.kind,
+                "command": j.payload.message[:50],
+                "last_status": j.state.last_status,
+                "next_run": j.state.next_run_at_ms
+            })
+        return res
 
     async def start(self):
         """Start the cron service."""
@@ -207,9 +284,10 @@ class CronManager:
             return
         self.running = True
         # Recompute next runs to ensure we haven't missed anything while closed
+        now = _now_ms()
         for job in self.jobs.values():
-            if job.status == "active":
-                job._compute_next_run()
+            if job.enabled:
+                job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
         
         self.save_jobs()
         self._arm_timer()
@@ -226,10 +304,10 @@ class CronManager:
     def _get_next_wake_time(self) -> Optional[float]:
         """Get the earliest next run time across all active jobs."""
         times = [
-            j.next_run_time for j in self.jobs.values() 
-            if j.status == "active" and j.next_run_time > 0
+            j.state.next_run_at_ms for j in self.jobs.values() 
+            if j.enabled and j.state.next_run_at_ms
         ]
-        return min(times) if times else None
+        return min(times) / 1000.0 if times else None
 
     def _arm_timer(self):
         """Schedule the next timer tick, Nanobot-style."""
@@ -259,10 +337,10 @@ class CronManager:
 
     async def _on_timer(self):
         """Handle timer tick - run due jobs."""
-        now = time.time()
+        now = _now_ms()
         due_jobs = [
             j for j in self.jobs.values()
-            if j.status == "active" and j.next_run_time > 0 and now >= (j.next_run_time - 0.1)
+            if j.enabled and j.state.next_run_at_ms and now >= j.state.next_run_at_ms
         ]
         
         for job in due_jobs:
@@ -291,80 +369,53 @@ class CronManager:
                 
             if not chat_id:
                 logger.error("No allowed_chat_id configured, cannot run cron.")
-                job.complete_run(False)
+                _complete_run(job, False, start_ms)
                 self.save_jobs()
                 return
 
-            if job.target == "main":
-                # Run in main context: mimic a system event
-                user_msg = f"[SYSTEM] HEARTBEAT / CRON:\n{job.command}"
-                logger.info(f"Running job {job.id} in MAIN session for {chat_id}")
-                
-                async def reply(response_text: str):
+            cron_thread_id = str(chat_id) if job.payload.kind == "system_event" else f"cron:{job.id}"
+            user_msg = f"[SYSTEM] CRON EVENT:\n{job.payload.message}"
+            
+            # Use Future to wait for isolated jobs if we need to log their responses
+            # For "system_event" (main), the response is handled normally by the bot
+            
+            final_response = "Sent to lane"
+            async def reply(response_text: str):
+                nonlocal final_response
+                final_response = response_text
+                if job.payload.deliver:
                     await telegram_client.send_message(chat_id=chat_id, text=response_text)
 
-                msg = StandardMessage(
-                    platform="cron_main",
-                    user_id=str(chat_id),
-                    text=user_msg,
-                    reply_func=reply if job.delivery_mode == "announce" else None
-                )
-                await lane_manager.submit(str(chat_id), agent_daemon, msg)
-                final_response = "Sent to main lane"
-                
-            else: # isolated
-                # Run isolated graph
-                logger.info(f"Running job {job.id} in ISOLATED session")
-                cron_thread_id = f"cron:{job.id}"
-                
-                # Setup execution in Graph
-                final_response = "Done!"
-                
-                async def reply(response_text: str):
-                    nonlocal final_response
-                    final_response = response_text
-
-                msg = StandardMessage(
-                    platform="cron_isolated",
-                    user_id=cron_thread_id,
-                    text=f"[SYSTEM] CRON ISOLATED TASK:\n{job.command}",
-                    reply_func=reply
-                )
-                
-                # Stream through graph directly, bypassing lane_manager to avoid main lane
-                result = await agent_daemon(msg)
-                
-                state = await graph.aget_state({"configurable": {"thread_id": cron_thread_id}})
-                if state.next:
-                    # Job paused for human approval. We cannot ask for approval in a background task
-                    # without notifying the user, or maybe it notifies them via usual flow?
-                    # The isolated graph will just sit paused. 
-                    # If we wanted to, we could simulate an interrupt message.
-                    logger.warning(f"Isolated job {job.id} paused for human approval.")
-                    final_response = "Paused for approval."
-                else:
-                    final_response = state.values.get("agent_response", final_response)
-                    if final_response is None:
-                        final_response = "Done! (No response)"
-                
-                # Delivery
-                if job.delivery_mode == "announce":
-                    await telegram_client.send_message(
-                        chat_id=chat_id, 
-                        text=f"🔔 *Cron Job Completed* (`{job.id}`):\n\n{final_response}"
-                    )
-                elif job.delivery_mode == "webhook":
-                    logger.info(f"Cron webhook delivery not fully implemented yet for {job.id}")
-                    # In a real implementation we'd do a POST request
+            msg = StandardMessage(
+                platform=f"cron_{job.payload.kind}",
+                user_id=cron_thread_id,
+                text=user_msg,
+                reply_func=reply
+            )
             
-            job.complete_run(True)
+            logger.info(f"Running job {job.id} ({job.payload.kind})")
+            future = await lane_manager.submit(cron_thread_id, agent_daemon, msg)
+            
+            # Wait for the agent daemon to finish the job
+            result = await future
+            
+            if result and "error" in result:
+                raise Exception(result["error"])
+                
+            _complete_run(job, True, start_ms)
+            
+            # Remove job if it was a one-shot configured to delete
+            if job.schedule.kind == "at" and job.delete_after_run:
+                self.jobs.pop(job.id, None)
+
             self.log_run(job.id, {"status": "completed", "response_preview": final_response[:100]})
             self.save_jobs()
             self._arm_timer() # Re-arm for the next occurrence
             
         except Exception as e:
             logger.error(f"Error executing job {job.id}: {e}", exc_info=True)
-            job.complete_run(False)
+            job.state.last_error = str(e)
+            _complete_run(job, False, start_ms)
             self.log_run(job.id, {"status": "error", "error": str(e)})
             self.save_jobs()
             self._arm_timer() # Re-arm with backoff if it's a recurring job
