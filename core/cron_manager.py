@@ -128,7 +128,7 @@ class CronManager:
     def _init(self):
         self.jobs: Dict[str, CronJob] = {}
         self.running = False
-        self._loop_task: Optional[asyncio.Task] = None
+        self._timer_task: Optional[asyncio.Task] = None
         self._ensure_dirs()
         self.load_jobs()
 
@@ -175,6 +175,7 @@ class CronManager:
         job = CronJob(job_data)
         self.jobs[job.id] = job
         self.save_jobs()
+        self._arm_timer()
         logger.info(f"Added job {job.id}")
         return job.id
 
@@ -186,12 +187,14 @@ class CronManager:
         job_data.update(updates)
         self.jobs[job_id] = CronJob(job_data)
         self.save_jobs()
+        self._arm_timer()
         return True
 
     def remove_job(self, job_id: str) -> bool:
         if job_id in self.jobs:
             del self.jobs[job_id]
             self.save_jobs()
+            self._arm_timer()
             return True
         return False
 
@@ -199,49 +202,87 @@ class CronManager:
         return [job.to_dict() for job in self.jobs.values()]
 
     async def start(self):
-        """Start the background checking loop."""
+        """Start the cron service."""
         if self.running:
             return
         self.running = True
-        self._loop_task = asyncio.create_task(self._cron_loop())
-        logger.info("Cron manager loop started.")
+        # Recompute next runs to ensure we haven't missed anything while closed
+        for job in self.jobs.values():
+            if job.status == "active":
+                job._compute_next_run()
+        
+        self.save_jobs()
+        self._arm_timer()
+        logger.info(f"Cron manager started with {len(self.jobs)} jobs.")
 
     async def stop(self):
-        """Stop the background checking loop."""
+        """Stop the cron service."""
         self.running = False
-        if self._loop_task:
-            self._loop_task.cancel()
-            self._loop_task = None
-        logger.info("Cron manager loop stopped.")
+        if self._timer_task:
+            self._timer_task.cancel()
+            self._timer_task = None
+        logger.info("Cron manager stopped.")
 
-    async def _cron_loop(self):
-        """The main loop evaluating job schedules."""
-        from core.lane_manager import lane_manager
-        from config.settings import settings
+    def _get_next_wake_time(self) -> Optional[float]:
+        """Get the earliest next run time across all active jobs."""
+        times = [
+            j.next_run_time for j in self.jobs.values() 
+            if j.status == "active" and j.next_run_time > 0
+        ]
+        return min(times) if times else None
+
+    def _arm_timer(self):
+        """Schedule the next timer tick, Nanobot-style."""
+        if self._timer_task:
+            self._timer_task.cancel()
         
-        while self.running:
+        if not self.running:
+            return
+
+        next_wake = self._get_next_wake_time()
+        if not next_wake:
+            logger.debug("No active jobs to arm timer for.")
+            return
+        
+        delay = max(0.1, next_wake - time.time())
+        
+        async def tick():
             try:
-                now = time.time()
-                for job in list(self.jobs.values()):
-                    if job.status == "active" and now >= job.next_run_time:
-                        logger.info(f"Triggering cron job {job.id}")
-                        self.log_run(job.id, {"status": "started"})
-                        
-                        # We trigger it via asyncio.create_task to not block the cron loop
-                        asyncio.create_task(self._execute_job(job))
-                        
-                await asyncio.sleep(10) # check every 10 seconds
+                await asyncio.sleep(delay)
+                if self.running:
+                    await self._on_timer()
             except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Cron loop error: {e}", exc_info=True)
-                await asyncio.sleep(10)
+                pass
+        
+        self._timer_task = asyncio.create_task(tick())
+        logger.debug(f"Cron timer armed: waking in {delay:.2f}s")
+
+    async def _on_timer(self):
+        """Handle timer tick - run due jobs."""
+        now = time.time()
+        due_jobs = [
+            j for j in self.jobs.values()
+            if j.status == "active" and j.next_run_time > 0 and now >= (j.next_run_time - 0.1)
+        ]
+        
+        for job in due_jobs:
+            logger.info(f"Triggering due cron job {job.id}")
+            self.log_run(job.id, {"status": "started"})
+            # Run in task to avoid blocking other due jobs
+            asyncio.create_task(self._execute_job(job))
+        
+        # We save and re-arm after triggering all due jobs.
+        # Note: _execute_job calls save_jobs and _arm_timer too, 
+        # but triggered jobs might take time.
+        self.save_jobs()
+        self._arm_timer()
 
     async def _execute_job(self, job: CronJob):
-        from app import _run_graph, checkpointer, telegram_client
+        from app import agent_daemon, checkpointer, telegram_client
         from nodes.graph import graph
         from core.lane_manager import lane_manager
         from config.settings import settings
+        from core.messaging import StandardMessage
         
         try:
             chat_id = None
@@ -256,9 +297,19 @@ class CronManager:
 
             if job.target == "main":
                 # Run in main context: mimic a system event
-                msg = f"[SYSTEM] HEARTBEAT / CRON:\n{job.command}"
+                user_msg = f"[SYSTEM] HEARTBEAT / CRON:\n{job.command}"
                 logger.info(f"Running job {job.id} in MAIN session for {chat_id}")
-                await lane_manager.submit(str(chat_id), _run_graph, chat_id, msg)
+                
+                async def reply(response_text: str):
+                    await telegram_client.send_message(chat_id=chat_id, text=response_text)
+
+                msg = StandardMessage(
+                    platform="cron_main",
+                    user_id=str(chat_id),
+                    text=user_msg,
+                    reply_func=reply if job.delivery_mode == "announce" else None
+                )
+                await lane_manager.submit(str(chat_id), agent_daemon, msg)
                 final_response = "Sent to main lane"
                 
             else: # isolated
@@ -267,22 +318,23 @@ class CronManager:
                 cron_thread_id = f"cron:{job.id}"
                 
                 # Setup execution in Graph
-                config = {"configurable": {"thread_id": cron_thread_id}}
                 final_response = "Done!"
                 
-                # Stream through graph directly, bypassing lane_manager to avoid main lane
-                async for event in graph.astream(
-                    {
-                        "chat_id": cron_thread_id,
-                        "user_input": f"[SYSTEM] CRON ISOLATED TASK:\n{job.command}",
-                        "tool_failure_count": 0,
-                    },
-                    config=config,
-                    stream_mode="updates"
-                ):
-                    pass
+                async def reply(response_text: str):
+                    nonlocal final_response
+                    final_response = response_text
+
+                msg = StandardMessage(
+                    platform="cron_isolated",
+                    user_id=cron_thread_id,
+                    text=f"[SYSTEM] CRON ISOLATED TASK:\n{job.command}",
+                    reply_func=reply
+                )
                 
-                state = await graph.aget_state(config)
+                # Stream through graph directly, bypassing lane_manager to avoid main lane
+                result = await agent_daemon(msg)
+                
+                state = await graph.aget_state({"configurable": {"thread_id": cron_thread_id}})
                 if state.next:
                     # Job paused for human approval. We cannot ask for approval in a background task
                     # without notifying the user, or maybe it notifies them via usual flow?
@@ -308,11 +360,13 @@ class CronManager:
             job.complete_run(True)
             self.log_run(job.id, {"status": "completed", "response_preview": final_response[:100]})
             self.save_jobs()
+            self._arm_timer() # Re-arm for the next occurrence
             
         except Exception as e:
             logger.error(f"Error executing job {job.id}: {e}", exc_info=True)
             job.complete_run(False)
             self.log_run(job.id, {"status": "error", "error": str(e)})
             self.save_jobs()
+            self._arm_timer() # Re-arm with backoff if it's a recurring job
 
 cron_manager = CronManager()

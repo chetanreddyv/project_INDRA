@@ -20,8 +20,9 @@ from langgraph.types import Command
 
 from config.settings import settings
 from interfaces.telegram import TelegramClient
-from graph import build_graph, checkpointer_context
+from nodes.graph import build_graph, checkpointer_context
 from core.lane_manager import lane_manager
+from core.messaging import StandardMessage, ResumeMessage
 
 # ── Logging ──────────────────────────────────────────────────
 logging.basicConfig(
@@ -148,7 +149,21 @@ async def _poll_telegram():
 
                 # Show typing and run graph SEQUENTIALLY via LaneManager
                 await telegram_client.send_typing_action(chat_id)
-                await lane_manager.submit(str(chat_id), _run_graph, chat_id, text)
+
+                async def reply(response_text: str):
+                    await telegram_client.send_message(chat_id=chat_id, text=response_text)
+
+                async def approve(action_summary: str, thread_id: str):
+                    await telegram_client.send_approval_buttons(chat_id=chat_id, action_summary=action_summary, thread_id=thread_id)
+
+                msg = StandardMessage(
+                    platform="telegram",
+                    user_id=str(chat_id),
+                    text=text,
+                    reply_func=reply,
+                    approval_func=approve
+                )
+                await lane_manager.submit(str(chat_id), agent_daemon, msg)
 
         except asyncio.CancelledError:
             logger.info("📡 Polling stopped")
@@ -241,8 +256,21 @@ async def webhook(request: Request):
         # Show typing indicator
         await telegram_client.send_typing_action(chat_id)
 
+        async def reply(response_text: str):
+            await telegram_client.send_message(chat_id=chat_id, text=response_text)
+
+        async def approve(action_summary: str, thread_id: str):
+            await telegram_client.send_approval_buttons(chat_id=chat_id, action_summary=action_summary, thread_id=thread_id)
+
+        msg = StandardMessage(
+            platform="telegram",
+            user_id=str(chat_id),
+            text=text,
+            reply_func=reply,
+            approval_func=approve
+        )
         # Run the graph sequentially via LaneManager
-        await lane_manager.submit(str(chat_id), _run_graph, chat_id, text)
+        await lane_manager.submit(str(chat_id), agent_daemon, msg)
 
         return {"status": "processing"}
 
@@ -253,34 +281,30 @@ async def webhook(request: Request):
 # 5. Graph Execution
 # ==========================================================
 
-async def _run_graph(chat_id: int, user_input: str):
+async def agent_daemon(msg: StandardMessage) -> dict:
     """
-    Run the LangGraph for a user message.
-    Sends the response or HITL buttons via Telegram when done.
+    Unified LangGraph runner. Processes the message and returns a dict with the result.
+    If callbacks are provided in msg, they are called immediately.
     """
-    thread_id = str(chat_id)
-    config = {"configurable": {"thread_id": thread_id}}
+    config = {"configurable": {"thread_id": msg.user_id}}
 
     try:
         # Stream through the graph
         async for event in graph.astream(
             {
-                "chat_id": thread_id,
-                "user_input": user_input,
+                "chat_id": msg.user_id,
+                "user_input": msg.text,
                 "tool_failure_count": 0,
             },
             config=config,
             stream_mode="updates",
         ):
-            logger.debug(f"Graph event: {event}")
+            logger.debug(f"Graph event ({msg.platform}): {event}")
 
         # Check final state
         state = await graph.aget_state(config)
 
         if state.next:
-            # Graph is paused (interrupt) — send approval buttons.
-            # The payload was built by the Python write-action gate, so
-            # tool_args are the *exact* arguments the LLM wanted to pass.
             interrupted = state.tasks[0].interrupts[0].value
             tool_args = interrupted.get("tool_args", {})
             args_text = (
@@ -294,34 +318,41 @@ async def _run_graph(chat_id: int, user_input: str):
                 f"{interrupted.get('details', '')}"
                 + (f"\n\n*Arguments:*\n{args_text}" if args_text else "")
             )
-            await telegram_client.send_approval_buttons(
-                chat_id=chat_id,
-                action_summary=action_summary,
-                thread_id=thread_id,
-            )
-            logger.info(f"🔐 HITL: Sent approval buttons to {chat_id}")
+            
+            if msg.approval_func:
+                await msg.approval_func(action_summary, msg.user_id)
+                logger.info(f"🔐 HITL: Sent approval request to {msg.platform} user {msg.user_id}")
+            
+            return {
+                "approval_required": True,
+                "action": interrupted.get("action", "unknown"),
+                "details": interrupted.get("details", ""),
+                "tool_args": interrupted.get("tool_args", {}),
+            }
         else:
-            # Graph completed — send response
             response = state.values.get("agent_response", "Done!")
             
-            # Suppress routine heartbeat output
-            if response.strip() != "HEARTBEAT_OK":
-                await telegram_client.send_message(chat_id=chat_id, text=response)
-                logger.info(f"💬 Sent response to {chat_id}")
-            else:
-                logger.info(f"🔇 Suppressed HEARTBEAT_OK from {chat_id}")
+            if msg.reply_func and response.strip() != "HEARTBEAT_OK":
+                await msg.reply_func(response)
+                logger.info(f"💬 Sent response to {msg.platform} user {msg.user_id}")
+            elif response.strip() == "HEARTBEAT_OK":
+                logger.info(f"🔇 Suppressed HEARTBEAT_OK from {msg.platform} user {msg.user_id}")
 
             # Trigger memorygate in background
             import asyncio
-            asyncio.create_task(_run_memorygate(thread_id, user_input, response))
+            asyncio.create_task(_run_memorygate(msg.user_id, msg.text, response))
+            
+            return {"response": response}
 
     except Exception as e:
-        logger.error(f"❌ Graph execution error: {e}", exc_info=True)
+        logger.error(f"❌ Graph execution error ({msg.platform}): {e}", exc_info=True)
         error_text = f"❌ Sorry, I encountered an error:\n{str(e)[:500]}"
-        try:
-            await telegram_client.send_message(chat_id=chat_id, text=error_text, parse_mode="")
-        except Exception:
-            await telegram_client.send_message(chat_id=chat_id, text="❌ An error occurred.", parse_mode="")
+        if msg.reply_func:
+            try:
+                await msg.reply_func(error_text)
+            except Exception:
+                await msg.reply_func("❌ An error occurred.")
+        return {"error": str(e)[:500]}
 
 
 async def _handle_callback_query(callback_query: dict):
@@ -372,44 +403,53 @@ async def _handle_callback_query(callback_query: dict):
         )
         return {"status": "awaiting_edit"}
 
+    async def reply(response_text: str):
+        await telegram_client.send_message(chat_id=chat_id, text=response_text)
+
+    msg = ResumeMessage(
+        platform="telegram",
+        user_id=thread_id,
+        decision=decision,
+        reply_func=reply
+    )
+
     # Resume the graph sequentially via LaneManager
     await lane_manager.submit(
         thread_id, 
-        _resume_graph, 
-        chat_id, 
-        message_id, 
-        callback_id, 
-        decision, 
-        thread_id
+        resume_daemon, 
+        msg
     )
 
     return {"status": "resumed"}
 
 
-async def _resume_graph(chat_id: int, message_id: int, callback_id: str, decision: str, thread_id: str):
+async def resume_daemon(msg: ResumeMessage) -> dict:
     """
-    Actual LangGraph resumption logic, executed sequentially by the LaneManager worker.
+    Unified LangGraph resumer.
     """
-    config = {"configurable": {"thread_id": thread_id}}
+    config = {"configurable": {"thread_id": msg.user_id}}
     try:
         async for event in graph.astream(
-            Command(resume=decision),
+            Command(resume=msg.decision),
             config=config,
             stream_mode="updates",
         ):
-            logger.debug(f"Resume event: {event}")
+            logger.debug(f"Resume event ({msg.platform}): {event}")
 
         state = await graph.aget_state(config)
         if not state.next:
             response = state.values.get("agent_response", "Done!")
-            await telegram_client.send_message(chat_id=chat_id, text=response)
+            if msg.reply_func:
+                await msg.reply_func(response)
+            return {"response": response}
+        else:
+            return {"status": "paused_again"}
 
     except Exception as e:
-        logger.error(f"❌ Resume error: {e}", exc_info=True)
-        await telegram_client.send_message(
-            chat_id=chat_id,
-            text=f"❌ Error resuming action:\n`{str(e)[:500]}`",
-        )
+        logger.error(f"❌ Resume error ({msg.platform}): {e}", exc_info=True)
+        if msg.reply_func:
+            await msg.reply_func(f"❌ Error resuming action:\n`{str(e)[:500]}`")
+        return {"error": str(e)[:500]}
 
 
 # ==========================================================
@@ -453,43 +493,20 @@ async def web_chat_send(request: Request):
 
     logger.info(f"🌐 Web chat from {thread_id}: {user_input[:100]}")
 
+    msg = StandardMessage(
+        platform="web",
+        user_id=thread_id,
+        text=user_input
+    )
+
     # Enqueue execution and await the future so we can respond to the HTTP request
-    future = await lane_manager.submit(thread_id, _run_web_graph, thread_id, user_input)
+    future = await lane_manager.submit(thread_id, agent_daemon, msg)
     try:
         result = await future
         return JSONResponse(result)
     except Exception as e:
         logger.error(f"❌ Web chat error: {e}", exc_info=True)
         return JSONResponse({"error": str(e)[:500]})
-
-async def _run_web_graph(thread_id: str, user_input: str) -> dict:
-    """Internal graph runner for web chat, executed sequentially."""
-    config = {"configurable": {"thread_id": thread_id}}
-    async for event in graph.astream(
-        {
-            "chat_id": thread_id,
-            "user_input": user_input,
-            "tool_failure_count": 0,
-        },
-        config=config,
-        stream_mode="updates",
-    ):
-        pass
-
-    state = await graph.aget_state(config)
-
-    if state.next:
-        interrupted = state.tasks[0].interrupts[0].value
-        return {
-            "approval_required": True,
-            "action": interrupted.get("action", "unknown"),
-            "details": interrupted.get("details", ""),
-            "tool_args": interrupted.get("tool_args", {}),
-        }
-    else:
-        response = state.values.get("agent_response", "Done!")
-        asyncio.create_task(_run_memorygate(thread_id, user_input, response))
-        return {"response": response}
 
 
 @app.post("/api/chat/approve")
@@ -507,28 +524,19 @@ async def web_chat_approve(request: Request):
 
     logger.info(f"🌐 Web approval: {decision} for thread {thread_id}")
 
-    future = await lane_manager.submit(thread_id, _resume_web_graph, thread_id, decision)
+    msg = ResumeMessage(
+        platform="web",
+        user_id=thread_id,
+        decision=decision
+    )
+
+    future = await lane_manager.submit(thread_id, resume_daemon, msg)
     try:
         result = await future
         return JSONResponse(result)
     except Exception as e:
         logger.error(f"❌ Web approval error: {e}", exc_info=True)
         return JSONResponse({"error": str(e)[:500]})
-
-
-async def _resume_web_graph(thread_id: str, decision: str) -> dict:
-    """Internal graph resumer for web chat, executed sequentially."""
-    config = {"configurable": {"thread_id": thread_id}}
-    async for event in graph.astream(
-        Command(resume=decision),
-        config=config,
-        stream_mode="updates",
-    ):
-        pass
-
-    state = await graph.aget_state(config)
-    response = state.values.get("agent_response", "Done!")
-    return {"response": response}
 
 
 # ==========================================================
