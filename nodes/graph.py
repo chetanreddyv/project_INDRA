@@ -10,8 +10,8 @@ from typing import TypedDict, Optional, Any
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from nodes.agent import agent_node
-from nodes.approval import human_approval_node
+from .agent import agent_node
+from .approval import human_approval_node
 
 logger = logging.getLogger(__name__)
 

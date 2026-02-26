@@ -33,7 +33,7 @@ class AgentResponse(BaseModel):
 # Paths
 SKILLS_DIR = Path(__file__).parent.parent / "skills"
 MCP_CONFIG_PATH = Path(__file__).parent.parent / "config" / "mcp_config.json"
-IDENTITY_FILE = Path(__file__).parent.parent / "identity.md"
+IDENTITY_FILE = Path(__file__).parent.parent / "skills" / "identity.md"
 
 
 # ==========================================================

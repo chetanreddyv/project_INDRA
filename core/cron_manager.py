@@ -238,7 +238,8 @@ class CronManager:
                 await asyncio.sleep(10)
 
     async def _execute_job(self, job: CronJob):
-        from app import _run_graph, graph, checkpointer, telegram_client
+        from app import _run_graph, checkpointer, telegram_client
+        from nodes.graph import graph
         from core.lane_manager import lane_manager
         from config.settings import settings
         

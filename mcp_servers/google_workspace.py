@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
-from google_auth_helper import get_google_creds
+from scripts.google_auth_helper import get_google_creds
 from googleapiclient.discovery import build
 
 load_dotenv()

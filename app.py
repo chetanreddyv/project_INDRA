@@ -19,7 +19,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from langgraph.types import Command
 
 from config.settings import settings
-from telegram import TelegramClient
+from interfaces.telegram import TelegramClient
 from graph import build_graph, checkpointer_context
 from core.lane_manager import lane_manager
 
@@ -48,17 +48,9 @@ async def lifespan(app: FastAPI):
 
     # ── Onboarding check ─────────────────────────────────────
     if settings.needs_onboarding:
-        logger.warning("")
-        logger.warning("═" * 56)
-        logger.warning("  ⚠️  INDRA is not configured yet!")
-        logger.warning("")
-        logger.warning("  Run the setup wizard:")
+        logger.warning("  ⚠️  INDRA is not configured yet! Run the setup wizard:")
         logger.warning("    uv run python onboarding.py")
-        logger.warning("")
-        logger.warning("  Or use CLI mode:")
-        logger.warning("    uv run python onboarding.py --cli")
-        logger.warning("═" * 56)
-        logger.warning("")
+        logger.warning("  Or use CLI mode: uv run python onboarding.py --cli")
         # Yield to keep FastAPI alive but don't initialize anything
         yield
         return
@@ -178,7 +170,7 @@ app = FastAPI(
 )
 
 # Mount web chat UI
-from web_chat import router as chat_router
+from interfaces.web_chat import router as chat_router
 app.include_router(chat_router)
 
 
