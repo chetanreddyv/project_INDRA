@@ -25,11 +25,11 @@ def cron_add(name: str, schedule_type: str, schedule_value: str, target: str, co
   - `"every"`: Time gap in **milliseconds** as a string (e.g. `"1200000"` for 20 minutes).
   - `"cron"`: A standard cron tab expression (e.g. `"0 9 * * 1-5"`). Note: the MCP tool doesn't take a separate `tz` argument, it uses the server default timezone unless specified in the cron interpreter logic internally.
 - **`target`**: 
-  - `"main"`: Triggers a `system_event` (good for direct reminders).
-  - `"isolated"`: Triggers an autonomous `agent_turn` (good for silent tasks).
-- **`command`**: The text message to send or the task description for the agent to execute.
+  - `"main"`: Triggers a `system_event` which sends a message directly back to the user in this current chat interface. **Use this for reminders. DO NOT ask the user for an email address to send a reminder.**
+  - `"isolated"`: Triggers an autonomous `agent_turn` (good for silent background tasks).
+- **`command`**: The text message to send to the user (if target is main) or the task description for the agent to execute (if target is isolated).
 - **`delivery_mode`**: 
-  - `"announce"`: Send the result to the user.
+  - `"announce"`: Send the result to the user. Always use this for direct reminders.
   - `"silent"`: Run the task without notifying the user (default).
 
 ### Practical Usage Examples

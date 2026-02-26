@@ -1,3 +1,8 @@
+---
+name: web_tools
+description: Search the web for up-to-date information, news, and fetch web page contents.
+---
+
 # Web Search Skill
 
 You have the ability to search the web for up-to-date information to answer user questions.

@@ -1,3 +1,8 @@
+---
+name: HEARTBEAT
+description: Process periodic system heartbeats and automated tasks.
+---
+
 # INDRA Routine Check & Heartbeat Protocol
 
 ## Role & Objective

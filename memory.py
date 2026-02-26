@@ -442,7 +442,7 @@ class ZvecMemoryStore:
         try:
             results = self.skill_collection.query(
                 zvec.VectorQuery("embedding", vector=vector),
-                topk=top_k * 2  # get more chunks initially to find unique skills
+                topk=top_k * 5  # get a few extra to ensure unique skills
             )
             
             # Filter by threshold + deduplicate to unique skill names
@@ -451,14 +451,13 @@ class ZvecMemoryStore:
                 if res.id == HEALTH_ID:
                     continue
                 
-                # Log the score at INFO level temporarily so we can debug relevance
-                logger.info(f"  -> Found skill chunk {res.id} with score {res.score:.3f}")
+                logger.info(f"  -> Found skill {res.id} with score {res.score:.3f}")
                 
                 if res.score < threshold:
-                    logger.info(f"  -> Skipping skill chunk {res.id} (below threshold {threshold})")
+                    logger.info(f"  -> Skipping skill {res.id} (below threshold {threshold})")
                     continue
                     
-                skill_id = res.id.rsplit("_", 1)[0]
+                skill_id = res.id
                 if skill_id not in skill_names:
                     skill_names.append(skill_id)
                     logger.info(f"  -> Skill accepted: {skill_id} (score={res.score:.3f})")
@@ -617,32 +616,36 @@ class ZvecMemoryStore:
         if not SKILLS_DIR.exists() or not self.skill_collection:
             return
 
+        import re
         skills_to_embed = []
         skill_ids = []
 
-        # Splitters
-        headers_to_split_on = [
-            ("#", "Header 1"),
-            ("##", "Header 2"),
-            ("###", "Header 3"),
-        ]
-        markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
-
         # Load all .md files
         for skill_file in SKILLS_DIR.glob("*.md"):
+            if skill_file.stem == "identity":
+                continue # identity is loaded separately into the system prompt
+
             skill_id = skill_file.stem  # e.g. "google_workspace"
             content = skill_file.read_text()
+            
+            name = skill_id
+            description = "Detailed documentation for the skill."
+            
+            # Simple YAML frontmatter parser
+            if content.startswith("---"):
+                parts = content.split("---", 2)
+                if len(parts) >= 3:
+                    frontmatter = parts[1]
+                    name_match = re.search(r"^name:\s*(.+)$", frontmatter, re.MULTILINE)
+                    if name_match:
+                        name = name_match.group(1).strip()
+                    desc_match = re.search(r"^description:\s*(.+)$", frontmatter, re.MULTILINE)
+                    if desc_match:
+                        description = desc_match.group(1).strip()
 
-            # 1. Split by header
-            md_docs = markdown_splitter.split_text(content)
-
-            # 2. Split large chunks recursively
-            final_chunks = text_splitter.split_documents(md_docs)
-
-            for i, chunk in enumerate(final_chunks):
-                skills_to_embed.append(chunk.page_content)
-                skill_ids.append(f"{skill_id}_{i}")
+            summary = f"Skill: {name}\nDescription: {description}"
+            skills_to_embed.append(summary)
+            skill_ids.append(skill_id)
 
         if not skills_to_embed:
             return
@@ -657,7 +660,7 @@ class ZvecMemoryStore:
             async with self._zvec_write_lock:
                 self.skill_collection.upsert(docs_to_zvec)
                 self.skill_collection.flush()
-            logger.info(f"✅ Embedded {len(docs_to_zvec)} skills into dynamic Zvec memory")
+            logger.info(f"✅ Embedded {len(docs_to_zvec)} skill summaries for Progressive Disclosure")
         except Exception as e:
             logger.error(f"Zvec skills insert failed: {e}")
 
