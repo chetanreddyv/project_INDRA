@@ -4,7 +4,12 @@ import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Literal
+import uuid
+
+"""Cron types."""
+
+from pydantic import BaseModel as _BaseModel, Field, ConfigDict
 
 try:
     from croniter import croniter
@@ -17,8 +22,59 @@ CRON_DATA_DIR = Path("data/cron")
 JOBS_FILE = CRON_DATA_DIR / "jobs.json"
 RUNS_DIR = CRON_DATA_DIR / "runs"
 
-import uuid
-from core.cron_types import CronJob, CronSchedule, CronPayload, CronJobState
+
+class BaseModel(_BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class CronSchedule(BaseModel):
+    """Schedule definition for a cron job."""
+    kind: Literal["at", "every", "cron"]
+    # For "at": timestamp in ms
+    at_ms: Optional[int] = Field(None, alias="atMs")
+    # For "every": interval in ms
+    every_ms: Optional[int] = Field(None, alias="everyMs")
+    # For "cron": cron expression (e.g. "0 9 * * *")
+    expr: Optional[str] = None
+    # Timezone for cron expressions
+    tz: Optional[str] = None
+
+
+class CronPayload(BaseModel):
+    """What to do when the job runs."""
+    kind: Literal["system_event", "agent_turn"] = "agent_turn"
+    message: str = ""
+    # Deliver response to channel
+    deliver: bool = False
+    channel: Optional[str] = None  # e.g. "telegram"
+    to: Optional[str] = None  # e.g. chat_id
+
+
+class CronJobState(BaseModel):
+    """Runtime state of a job."""
+    next_run_at_ms: Optional[int] = Field(None, alias="nextRunAtMs")
+    last_run_at_ms: Optional[int] = Field(None, alias="lastRunAtMs")
+    last_status: Optional[Literal["ok", "error", "skipped"]] = Field(None, alias="lastStatus")
+    last_error: Optional[str] = Field(None, alias="lastError")
+
+
+class CronJob(BaseModel):
+    """A scheduled job."""
+    id: str
+    name: str
+    enabled: bool = True
+    schedule: CronSchedule = Field(default_factory=lambda: CronSchedule(kind="every"))
+    payload: CronPayload = Field(default_factory=CronPayload)
+    state: CronJobState = Field(default_factory=CronJobState)
+    created_at_ms: int = Field(0, alias="createdAtMs")
+    updated_at_ms: int = Field(0, alias="updatedAtMs")
+    delete_after_run: bool = Field(False, alias="deleteAfterRun")
+
+
+class CronStore(BaseModel):
+    """Persistent store for cron jobs."""
+    version: int = 1
+    jobs: list[CronJob] = Field(default_factory=list)
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -40,13 +96,17 @@ def _compute_next_run(schedule: CronSchedule, now_ms: int) -> Optional[int]:
             
         try:
             base_time = now_ms / 1000.0
-            tz = timezone.utc
+            
             if schedule.tz:
                 try:
                     from zoneinfo import ZoneInfo
                     tz = ZoneInfo(schedule.tz)
                 except Exception:
-                    pass
+                    # Fallback to local time if invalid ZoneInfo
+                    tz = datetime.now().astimezone().tzinfo
+            else:
+                tz = datetime.now().astimezone().tzinfo
+
             base_dt = datetime.fromtimestamp(base_time, tz=tz)
             cron = croniter(schedule.expr, base_dt)
             next_dt = cron.get_next(datetime)
@@ -117,38 +177,9 @@ class CronManager:
         
         try:
             with open(JOBS_FILE, "r") as f:
-                data = json.load(f)
-                jobs = []
-                for j in data.get("jobs", []):
-                    jobs.append(CronJob(
-                        id=j["id"],
-                        name=j["name"],
-                        enabled=j.get("enabled", True),
-                        schedule=CronSchedule(
-                            kind=j["schedule"]["kind"],
-                            at_ms=j["schedule"].get("atMs"),
-                            every_ms=j["schedule"].get("everyMs"),
-                            expr=j["schedule"].get("expr"),
-                            tz=j["schedule"].get("tz"),
-                        ),
-                        payload=CronPayload(
-                            kind=j["payload"].get("kind", "agent_turn"),
-                            message=j["payload"].get("message", ""),
-                            deliver=j["payload"].get("deliver", False),
-                            channel=j["payload"].get("channel"),
-                            to=j["payload"].get("to"),
-                        ),
-                        state=CronJobState(
-                            next_run_at_ms=j.get("state", {}).get("nextRunAtMs"),
-                            last_run_at_ms=j.get("state", {}).get("lastRunAtMs"),
-                            last_status=j.get("state", {}).get("lastStatus"),
-                            last_error=j.get("state", {}).get("lastError"),
-                        ),
-                        created_at_ms=j.get("createdAtMs", 0),
-                        updated_at_ms=j.get("updatedAtMs", 0),
-                        delete_after_run=j.get("deleteAfterRun", False),
-                    ))
-                self.jobs = {job.id: job for job in jobs}
+                json_data = f.read()
+                store = CronStore.model_validate_json(json_data)
+                self.jobs = {job.id: job for job in store.jobs}
             logger.info(f"Loaded {len(self.jobs)} cron jobs.")
         except Exception as e:
             logger.error(f"Failed to load jobs: {e}")
@@ -156,42 +187,9 @@ class CronManager:
     def save_jobs(self):
         """Save jobs to local JSON file."""
         try:
-            data = {
-                "version": 1,
-                "jobs": [
-                    {
-                        "id": j.id,
-                        "name": j.name,
-                        "enabled": j.enabled,
-                        "schedule": {
-                            "kind": j.schedule.kind,
-                            "atMs": j.schedule.at_ms,
-                            "everyMs": j.schedule.every_ms,
-                            "expr": j.schedule.expr,
-                            "tz": j.schedule.tz,
-                        },
-                        "payload": {
-                            "kind": j.payload.kind,
-                            "message": j.payload.message,
-                            "deliver": j.payload.deliver,
-                            "channel": j.payload.channel,
-                            "to": j.payload.to,
-                        },
-                        "state": {
-                            "nextRunAtMs": j.state.next_run_at_ms,
-                            "lastRunAtMs": j.state.last_run_at_ms,
-                            "lastStatus": j.state.last_status,
-                            "lastError": j.state.last_error,
-                        },
-                        "createdAtMs": j.created_at_ms,
-                        "updatedAtMs": j.updated_at_ms,
-                        "deleteAfterRun": j.delete_after_run,
-                    }
-                    for j in self.jobs.values()
-                ]
-            }
+            store = CronStore(version=1, jobs=list(self.jobs.values()))
             with open(JOBS_FILE, "w") as f:
-                json.dump(data, f, indent=2)
+                f.write(store.model_dump_json(by_alias=True, indent=2))
         except Exception as e:
             logger.error(f"Failed to save jobs: {e}")
 

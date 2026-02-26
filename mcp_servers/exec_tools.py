@@ -115,7 +115,7 @@ async def execute_command(
             f"Use the process tool with action='poll' and sessionId='{session_id}' to check status."
         )
 
-async def process_action(action: str, sessionId: str, keys: list = None, text: str = None) -> str:
+async def process_action(action: str, sessionId: str, keys: list[str] = None, text: str = None) -> str:
     """
     Interact with a background process session.
     

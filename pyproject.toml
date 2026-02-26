@@ -12,8 +12,6 @@ dependencies = [
     # Agentic orchestration
     "langgraph>=0.3.0",
     "langgraph-checkpoint-sqlite>=2.0.0",
-    # LLM agent framework
-    "pydantic-ai[google]>=0.1.0",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.7.0",
     # Google APIs (for workspace MCP server)
@@ -30,6 +28,8 @@ dependencies = [
     "ddgs>=9.10.0",
     "croniter>=6.0.0",
     "typeguard>=4.5.1",
+    "langchain-google-genai>=4.2.1",
+    "langchain-core>=1.2.14",
 ]
 
 [project.optional-dependencies]

@@ -1,112 +1,49 @@
 """
-nodes/approval.py — Human-in-the-Loop approval node.
+nodes/approval.py — Human-in-the-Loop approval node (Native LangGraph).
 
 Uses LangGraph's interrupt() to pause the graph when a write action
-is intercepted by the Python approval gate in nodes/agent.py.
+is detected by the router. 
 
-Security model
---------------
-By the time this node runs, the write action has already been
-*blocked* by Python (``WriteActionRequiresApproval`` was raised).
-The ``pending_action`` dict contains:
-
-    {
-        "action":    str           # tool name, e.g. "send_email"
-        "skill":     str           # owning skill, e.g. "google_workspace"
-        "tool_args": dict          # exact args the LLM supplied
-        "details":   str           # human-readable summary
-    }
-
-On approval, the tool is executed programmatically by importing the
-real function from the MCP server module and calling it directly.
-
-Resumes with the user's decision from Telegram buttons:
-  - "approve" → execute the action via direct function call
-  - "reject"  → inform user, no side-effect
-  - "edit:<instruction>" → re-run agent with the edit instruction
+If approved, routes to execution.
+If rejected, appends a ToolMessage representing the rejection back to the agent.
 """
 
 import logging
 from langgraph.types import interrupt
+from langchain_core.messages import ToolMessage
 
 logger = logging.getLogger(__name__)
-
-
-# ══════════════════════════════════════════════════════════════
-# Tool Dispatcher — programmatic execution of approved actions
-# ══════════════════════════════════════════════════════════════
-
-def _get_tool_registry() -> dict:
-    """
-    Lazily load the global tool registry from the mcp_servers plugin manager.
-    Maps tool names to their implementing functions.
-    """
-    try:
-        from mcp_servers import GLOBAL_TOOL_REGISTRY
-        return GLOBAL_TOOL_REGISTRY
-    except ImportError as e:
-        logger.warning(f"Could not load GLOBAL_TOOL_REGISTRY: {e}")
-        return {}
-
-
-import inspect
-
-async def _execute_tool(action_name: str, tool_args: dict) -> str:
-    """
-    Execute a tool by name with the given arguments.
-    Returns the tool's string result or an error message.
-    """
-    registry = _get_tool_registry()
-    func = registry.get(action_name)
-    if not func:
-        return f"Error: Tool '{action_name}' not found in registry."
-
-    try:
-        logger.info(f"  -> Executing {action_name}({tool_args})")
-        result = func(**tool_args)
-        if inspect.isawaitable(result):
-            result = await result
-        logger.info(f"  -> {action_name} completed successfully")
-        return str(result)
-    except Exception as e:
-        logger.error(f"  -> {action_name} failed: {e}")
-        return f"Error executing {action_name}: {e}"
-
-
-# ══════════════════════════════════════════════════════════════
-# Approval Node
-# ══════════════════════════════════════════════════════════════
 
 async def human_approval_node(state: dict) -> dict:
     """
     Pause the graph and wait for human approval via Telegram buttons.
-
-    Flow
-    ----
-    1. ``interrupt()`` is called with the action details.
-    2. LangGraph pauses and saves state to the checkpointer.
-    3. FastAPI sends Telegram approval buttons to the user.
-    4. User clicks a button → ``Command(resume=decision)`` resumes here.
-    5. On approve → call the real tool function programmatically.
     """
     logger.info("--- [Node: Human Approval] ---")
-    pending = state.get("pending_action", {})
+    messages = state.get("messages", [])
+    if not messages:
+        return {}
+        
+    last_message = messages[-1]
+    
+    if not hasattr(last_message, "tool_calls") or not last_message.tool_calls:
+        logger.warning("  -> No pending tool calls, skipping approval")
+        return {}
 
-    if not pending:
-        logger.warning("  -> No pending action, skipping approval")
-        return {"pending_action": None}
+    # Gather tool calls that caused this interrupt
+    # The router decided to send us here, so we review *all* tools in this step
+    action_names = [call["name"] for call in last_message.tool_calls]
+    
+    # We display the first one for simplicity, or we can format all of them.
+    # Let's format the interrupt payload
+    first_call = last_message.tool_calls[0]
+    action_name = first_call["name"]
+    tool_args = first_call["args"]
 
-    action_name = pending.get("action", "unknown")
-    skill_name = pending.get("skill", "unknown")
-    tool_args = pending.get("tool_args", {})
-
-    # Build the interrupt payload — this is what app.py reads to
-    # construct the Telegram approval message.
     interrupt_payload = {
         "action": action_name,
-        "skill": skill_name,
+        "skill": "unknown", # Skill mapping can be added back if needed
         "tool_args": tool_args,
-        "details": pending.get("details", f"Call **{action_name}**"),
+        "details": f"Call **{action_name}** with args: {tool_args}",
     }
 
     # ── PAUSE ── LangGraph saves state; resumes when user responds ──
@@ -114,39 +51,36 @@ async def human_approval_node(state: dict) -> dict:
     logger.info(f"  -> Human decision received: {decision}")
 
     if decision == "approve":
-        # ── Execute the real tool programmatically ──────────────────
-        result = await _execute_tool(action_name, tool_args)
-        args_lines = "\n".join(f"  • {k}: {v}" for k, v in tool_args.items())
-        response = (
-            f"✅ Action Approved & Executed\n\n"
-            f"{action_name} completed.\n"
-            + (f"\n{args_lines}\n" if args_lines else "")
-            + f"\nResult: {result}"
-        )
-        return {
-            "agent_response": response,
-            "pending_action": None,
-        }
+        # On approve, we just return an action state or let the router guide it
+        # Actually, if approved, we want the graph to continue to `execute_tools`.
+        # We can communicate this via a simple state update, or just return nothing since the edge will route it.
+        # Wait, the edge from human_approval_node should be conditional!
+        return {"pending_action": None, "approval_status": "approved"}
 
     elif isinstance(decision, str) and decision.startswith("edit:"):
         edit_instruction = decision[5:].strip()
         logger.info(f"  -> User requested edit: {edit_instruction}")
-        return {
-            "agent_response": None,
-            "pending_action": None,
-            "user_input": f"Please modify the previous action: {edit_instruction}",
-            "_needs_rerun": True,
-        }
+        
+        # Append ToolMessages for all interrupted tools indicating feedback
+        tool_messages = []
+        for call in last_message.tool_calls:
+            tool_messages.append(
+                ToolMessage(
+                    content=f"User feedback/edit requested: {edit_instruction}. Please adjust your action.",
+                    tool_call_id=call["id"]
+                )
+            )
+        return {"messages": tool_messages, "approval_status": "rejected"}
 
     else:
-        # Rejected (or unknown decision — always safe-fail to reject)
+        # Rejected 
         logger.info(f"  -> Action rejected (decision={decision!r})")
-        response = (
-            f"❌ Action Rejected\n\n"
-            f"{action_name} was not executed.\n\n"
-            f"If you'd like me to try a different approach, just let me know."
-        )
-        return {
-            "agent_response": response,
-            "pending_action": None,
-        }
+        tool_messages = []
+        for call in last_message.tool_calls:
+            tool_messages.append(
+                ToolMessage(
+                    content=f"User rejected execution of this tool.",
+                    tool_call_id=call["id"]
+                )
+            )
+        return {"messages": tool_messages, "approval_status": "rejected"}

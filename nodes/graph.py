@@ -6,15 +6,17 @@ with SQLite checkpointing for persistent state across restarts.
 """
 
 import logging
-from typing import TypedDict, Optional
+from typing import TypedDict, Optional, Annotated
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.graph.message import add_messages
+from langchain_core.messages import BaseMessage
 
-from .agent import agent_node
+from .agent import agent_node, _get_enabled_tools_and_write_actions
 from .approval import human_approval_node
+from .tools import execute_tools_node
 
 logger = logging.getLogger(__name__)
-
 
 # ==========================================================
 # 1. State Schema
@@ -26,14 +28,16 @@ class AgentState(TypedDict):
     # ── Core ──────────────────────────────────────────────────
     chat_id: str                              # Telegram chat ID (= thread_id)
     user_input: str                           # Current user message
+    messages: Annotated[list[BaseMessage], add_messages] # Context window
 
     # ── Agent ─────────────────────────────────────────────────
     agent_response: Optional[str]             # Final response text
-    pending_action: Optional[dict]            # Action awaiting HITL approval
     tool_failure_count: int                   # Self-correction counter
+    approval_status: Optional[str]            # Track hitl output
 
     # ── Memory ────────────────────────────────────────────────
     memory_context: Optional[str]             # Retrieved long-term context
+    context_data: Optional[dict]              # Additional system properties
 
 
 # ==========================================================
@@ -45,22 +49,44 @@ def route_after_agent(state: AgentState) -> str:
     # If agent hit max failures, go straight to END
     if state.get("tool_failure_count", 0) >= 3:
         return END
+
     # If agent needs a retry (self-correction)
     if state.get("_retry"):
         return "agent"
-    # If there's a pending write action, route to HITL
-    if state.get("pending_action"):
-        return "human_approval"
-    # Normal completion
-    return END
 
+    messages = state.get("messages", [])
+    if not messages:
+        return END
+
+    last_message = messages[-1]
+
+    # No tool calls? The agent is done.
+    if not hasattr(last_message, "tool_calls") or not last_message.tool_calls:
+        return END
+
+    # Dynamically get the dangerous write actions
+    _, write_actions, _ = _get_enabled_tools_and_write_actions()
+
+    # Check for dangerous tools requiring HITL
+    for tool_call in last_message.tool_calls:
+        if tool_call["name"] in write_actions:
+            return "human_approval"
+
+    # Otherwise, it's a safe read tool. Execute immediately.
+    return "execute_tools"
 
 def route_after_approval(state: AgentState) -> str:
     """Decide what happens after human approval."""
-    # If user requested an edit, re-run the agent
-    if state.get("_needs_rerun"):
+    # If rejected or changed, loop back to agent with the feedback ToolMessage
+    if state.get("approval_status") == "rejected":
         return "agent"
-    return END
+    
+    # If approved, proceed to execute tools
+    if state.get("approval_status") == "approved":
+        return "execute_tools"
+    
+    # Fallback
+    return "agent"
 
 
 # ==========================================================
@@ -73,30 +99,34 @@ def build_graph(checkpointer=None):
     
     Flow:
         START → agent → (conditional)
-                                   ├→ human_approval → (conditional)
-                                   │                    ├→ agent (edit)
-                                   │                    └→ END
-                                   ├→ agent (retry)
-                                   └→ END
+                           ├→ END
+                           ├→ execute_tools → agent
+                           └→ human_approval → (conditional)
+                                                ├→ execute_tools
+                                                └→ agent
     """
     builder = StateGraph(AgentState)
 
     # Add nodes
     builder.add_node("agent", agent_node)
     builder.add_node("human_approval", human_approval_node)
+    builder.add_node("execute_tools", execute_tools_node)
 
     # Wire edges
     builder.add_edge(START, "agent")
     builder.add_conditional_edges(
         "agent",
         route_after_agent,
-        ["human_approval", "agent", END],
+        ["human_approval", "execute_tools", "agent", END],
     )
     builder.add_conditional_edges(
         "human_approval",
         route_after_approval,
-        ["agent", END],
+        ["execute_tools", "agent"],
     )
+    
+    # Critical Loop: Execute tools always goes back to agent
+    builder.add_edge("execute_tools", "agent")
 
     # Compile with checkpointer
     graph = builder.compile(checkpointer=checkpointer)
@@ -114,21 +144,9 @@ from pathlib import Path
 # Default path — can be overridden via the DB_PATH env var
 _DEFAULT_DB_PATH = os.getenv("DB_PATH", "./data/checkpoints.db")
 
-
 def checkpointer_context(db_path: str = _DEFAULT_DB_PATH):
     """
     Return an async context manager that opens an AsyncSqliteSaver.
-
-    Usage (in FastAPI lifespan)::
-
-        async with checkpointer_context() as cp:
-            graph = build_graph(checkpointer=cp)
-            yield  # serve requests
-        # connection is closed automatically on exit
-
-    Args:
-        db_path: Path to the SQLite file.  The parent directory is
-                 created automatically if it does not exist.
     """
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     logger.info(f"📂 SQLite checkpointer will use → {db_path}")

@@ -61,5 +61,14 @@
             "exec",
             "process"
         ]
+    },
+    "background": {
+        "description": "Background Subagent task execution for research",
+        "enabled": true,
+        "module": "background_tools",
+        "tools": [
+            "delegate_research"
+        ],
+        "write_actions": []
     }
 }

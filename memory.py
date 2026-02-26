@@ -15,7 +15,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, RunContext
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import SystemMessage, HumanMessage
 import zvec
 
 logger = logging.getLogger(__name__)
@@ -57,12 +58,7 @@ Your task: Extract NEW, notable, and actionable information about the user.
 4. Keep entries to a single, concise sentence.
 """
 
-memory_agent = Agent("google-gla:gemini-2.5-flash", output_type=ExtractedMemory)
-
-@memory_agent.system_prompt
-def build_extraction_prompt(ctx: RunContext[str]) -> str:
-    existing_memory = ctx.deps if ctx.deps else "No existing memory."
-    return EXTRACTION_PROMPT.format(existing_memory=existing_memory)
+memory_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash").with_structured_output(ExtractedMemory)
 
 
 # ==========================================================
@@ -717,8 +713,11 @@ class MemoryGate:
 
         # 3. Extract structured memories (passing current memories as context)
         try:
-            result = await memory_agent.run(conversation, deps=relevant_context)
-            memory: ExtractedMemory = result.output
+            system_msg = EXTRACTION_PROMPT.format(existing_memory=relevant_context if relevant_context else "No existing memory.")
+            memory = await memory_llm.ainvoke([
+                SystemMessage(content=system_msg),
+                HumanMessage(content=conversation)
+            ])
 
             if memory.important:
                 await self.store.apply_updates(memory, source_thread_id=thread_id)

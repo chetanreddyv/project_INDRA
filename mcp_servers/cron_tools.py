@@ -1,6 +1,5 @@
 import logging
-from core.cron_types import CronSchedule
-from core.cron_manager import cron_manager
+from core.cron_manager import CronSchedule, cron_manager
 
 logger = logging.getLogger("mcp.cron_tools")
 

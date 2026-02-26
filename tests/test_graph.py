@@ -10,7 +10,7 @@ import os
 # Ensure the root directory is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from graph import build_graph
+from nodes.graph import build_graph
 
 logging.basicConfig(level=logging.INFO)
 
@@ -30,6 +30,9 @@ async def run_test():
         stream_mode="updates"
     ):
         print("Event:", event)
+        
+    state = await graph.aget_state(config)
+    print("\nFinal State Values:", state.values.get("messages"))
 
     print("\n--- Test 2: Write Action ---")
     async for event in graph.astream(
@@ -38,6 +41,9 @@ async def run_test():
         stream_mode="updates"
     ):
         print("Event:", event)
+
+    state = await graph.aget_state(config)
+    print("\nFinal State Values:", state.values.get("messages"))
 
 if __name__ == "__main__":
     asyncio.run(run_test())

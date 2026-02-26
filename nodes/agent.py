@@ -1,64 +1,22 @@
 """
-nodes/agent.py — Core Pydantic AI executor node.
+nodes/agent.py — Core LangChain executor node.
 
-Loads the relevant skill prompt, attaches MCP tools dynamically,
-and executes the agent. Handles tool failure self-correction.
-
-HITL Security Model
--------------------
-Approval is NOT decided by the LLM. Instead, every tool whose name
-appears in the ``write_actions`` list of mcp_config.json is wrapped
-by a Python interceptor.  When the LLM tries to *call* such a tool
-the interceptor raises ``WriteActionRequiresApproval`` before any
-side-effect occurs.  The agent node catches that exception, stores
-the pending action, and routes the graph to the human_approval node.
-The LLM never has the ability to bypass this gate.
+Loads the relevant skill prompt, attaches tools dynamically,
+and executes the agent via LangChain. 
 """
 
 import json
 import logging
 from pathlib import Path
-from pydantic import BaseModel, Field
-from pydantic_ai import Agent
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import SystemMessage, AIMessage, HumanMessage
 
 logger = logging.getLogger(__name__)
-
-# Pydantic structured output for Telegram to avoid Markdown errors
-class AgentResponse(BaseModel):
-    response: str = Field(
-        description="The final message to send to the user. MUST be formatted using standard Markdown (so you can use *, _, `, ```, lists, etc). Do NOT use HTML tags."
-    )
 
 # Paths
 SKILLS_DIR = Path(__file__).parent.parent / "skills"
 MCP_CONFIG_PATH = Path(__file__).parent.parent / "config" / "mcp_config.json"
 IDENTITY_FILE = Path(__file__).parent.parent / "skills" / "identity" / "skill.md"
-
-
-# ==========================================================
-# Write-Action Gate
-# ==========================================================
-
-class WriteActionRequiresApproval(Exception):
-    """
-    Raised inside a write-action tool wrapper to abort the current
-    agent run and route to the human_approval node.
-
-    Attributes
-    ----------
-    action : str
-        The tool/action name that was intercepted (e.g. ``send_email``).
-    tool_args : dict
-        The arguments the LLM passed to the tool.
-    skill : str
-        The skill/server the action belongs to.
-    """
-    def __init__(self, action: str, tool_args: dict, skill: str):
-        self.action = action
-        self.tool_args = tool_args
-        self.skill = skill
-        super().__init__(f"Write action intercepted by Python gate: {action}")
-
 
 def _load_identity_prompt() -> str:
     """Load the core identity prompt from identity.md."""
@@ -66,13 +24,11 @@ def _load_identity_prompt() -> str:
         return IDENTITY_FILE.read_text()
     return ""
 
-
 def _load_mcp_config() -> dict:
     """Load MCP tool configuration."""
     if MCP_CONFIG_PATH.exists():
         return json.loads(MCP_CONFIG_PATH.read_text())
     return {}
-
 
 def _get_enabled_tools_and_write_actions() -> tuple[list[str], set[str], dict[str, str]]:
     """
@@ -96,58 +52,18 @@ def _get_enabled_tools_and_write_actions() -> tuple[list[str], set[str], dict[st
                 
     return enabled_tools, write_actions, action_skill_map
 
-
-def _make_write_action_tool(action_name: str, skill_name: str, real_func):
-    """
-    Return a Pydantic AI–compatible async tool function that
-    *intercepts* the call and raises ``WriteActionRequiresApproval``
-    before any real side-effect runs.
-
-    Copies the real tool's signature and docstring from the real function
-    so the LLM sees proper parameter schemas.
-    """
-    import inspect
-
-    async def _interceptor(**kwargs) -> str:
-        logger.warning(
-            f"  -> [GATE] Write action intercepted by Python: {action_name}"
-        )
-        raise WriteActionRequiresApproval(
-            action=action_name,
-            tool_args=kwargs,
-            skill=skill_name,
-        )
-
-    # Copy real function's metadata onto the interceptor
-    _interceptor.__name__ = action_name
-    if real_func:
-        # Copy signature so the LLM sees real parameter names + types
-        real_sig = inspect.signature(real_func)
-        _interceptor.__signature__ = real_sig
-        _interceptor.__doc__ = real_func.__doc__ or f"Execute {action_name}."
-        _interceptor.__annotations__ = getattr(real_func, "__annotations__", {})
-    else:
-        _interceptor.__doc__ = f"Execute {action_name}. (No schema available.)"
-
-    return _interceptor
-
-
 async def agent_node(state: dict) -> dict:
     """
-    Execute the Pydantic AI agent with dynamically loaded skills + tools.
-
-    Flow
-    ----
-    1. Build full system prompt (identity → memory → skill).
-    2. Register write-action tools as Python interceptors.
-    3. Run the agent.
-    4. If the LLM calls a write tool → Python raises
-       ``WriteActionRequiresApproval`` → set ``pending_action`` for HITL.
-    5. On other tool failure → increment failure count and retry (up to 3×).
+    Execute the LangChain agent with dynamically loaded skills + tools.
     """
     logger.info("--- [Node: Agent] ---")
-
+    
+    messages = state.get("messages", [])
     user_input = state.get("user_input", "")
+    
+    if not messages and not user_input:
+        logger.debug("  -> Empty state and no user input, skipping agent loop.")
+        return {}
     tool_failure_count = state.get("tool_failure_count", 0)
 
     # ── Load core identity ──────────────────────────────────────────
@@ -171,15 +87,14 @@ async def agent_node(state: dict) -> dict:
     if identity_prompt:
         prompt_parts.append(identity_prompt)
     if memory_context:
-        prompt_parts.append(f"## User Context (from long-term memory)\n{memory_context}")
+        prompt_parts.append(f"## User Context (from long-term memory)\\n{memory_context}")
     prompt_parts.append(skill_prompts)
-    full_system_prompt = "\n\n---\n\n".join(prompt_parts)
+    
+    # We append extra formatting rules if we want
+    full_system_prompt = "\\n\\n---\\n\\n".join(prompt_parts) + "\\n\\nALWAYS format your output using standard Markdown (use *, _, `, ```, lists). Do NOT use HTML tags. Respond directly to the user."
 
-    # ── Build Pydantic AI Tools ─────────────────────────────────────
-    # Load all enabled tools from the global registry.
-    # Write actions get wrapped in an interceptor for HITL approval.
-    # Read actions are passed directly as plain functions.
-    enabled_tool_names, write_actions, action_skill_map = _get_enabled_tools_and_write_actions()
+    # ── Build LangChain Tools ─────────────────────────────────────
+    enabled_tool_names, _, _ = _get_enabled_tools_and_write_actions()
     
     from mcp_servers import GLOBAL_TOOL_REGISTRY
     
@@ -187,79 +102,54 @@ async def agent_node(state: dict) -> dict:
     for action_name in enabled_tool_names:
         real_func = GLOBAL_TOOL_REGISTRY.get(action_name)
         if not real_func:
-            logger.warning(f"  -> Tool {action_name} enabled in config but missing from registry.")
+            logger.warning(f"  -> Tool {action_name} enabled but missing.")
             continue
-            
-        if action_name in write_actions:
-            skill_name = action_skill_map.get(action_name, "unknown")
-            all_tools.append(_make_write_action_tool(action_name, skill_name, real_func))
-        else:
-            all_tools.append(real_func)
+        # In LangChain, tools can be raw functions. `bind_tools` converts them.
+        all_tools.append(real_func)
 
-    # ── Create agent ────────────────────────────────────────────────
-    agent = Agent(
-        "google-gla:gemini-2.5-flash",
-        system_prompt=full_system_prompt + "\n\nALWAYS format your output using standard Markdown (use *, _, `, ```, lists). Do NOT use HTML tags. Respond directly to the user.",
-        output_type=str,
-        tools=all_tools,
-    )
+    # ── Create agent LLM ────────────────────────────────────────────────
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
+    
+    # Bind tools
+    llm_with_tools = llm.bind_tools(all_tools) if all_tools else llm
 
     try:
-        result = await agent.run(user_input)
-        response_text = result.output
+        # Prepend the system message
+        invoke_messages = [SystemMessage(content=full_system_prompt)]
+        
+        # Then append the persistent history
+        invoke_messages.extend(messages)
+        
+        # Then append the current user input as a HumanMessage
+        if user_input:
+            human_msg = HumanMessage(content=user_input)
+            invoke_messages.append(human_msg)
 
-        logger.info(f"  -> Agent response generated ({len(response_text)} chars)")
+        result = await llm_with_tools.ainvoke(invoke_messages)
+        logger.info(f"  -> Agent response generated ({len(str(result.content))} chars)")
+        
+        # Return both the human message (so it saves to state) and the AI response
+        new_messages = [human_msg, result] if user_input else [result]
+        
         return {
-            "agent_response": response_text,
-            "pending_action": None,
-            "tool_failure_count": 0,
-        }
-
-    except WriteActionRequiresApproval as wa:
-        # ── Python gate fired — route to HITL ──────────────────────
-        logger.info(
-            f"  -> [GATE] Routing to HITL: action={wa.action}, "
-            f"skill={wa.skill}, args={wa.tool_args}"
-        )
-        # Build a human-readable summary of what the LLM wanted to do
-        args_summary = "\n".join(
-            f"  **{k}**: {v}" for k, v in wa.tool_args.items()
-        )
-        pending_action = {
-            "action": wa.action,
-            "skill": wa.skill,
-            "tool_args": wa.tool_args,
-            "details": (
-                f"The assistant wants to call **{wa.action}** with:\n{args_summary}"
-                if wa.tool_args
-                else f"The assistant wants to call **{wa.action}**."
-            ),
-        }
-        return {
-            "pending_action": pending_action,
-            "agent_response": None,
-            "tool_failure_count": 0,
+            "messages": new_messages, 
+            "tool_failure_count": 0, 
+            "agent_response": result.content,
+            "user_input": "" # Clear user input so we don't duplicate it on loopbacks
         }
 
     except Exception as e:
         tool_failure_count += 1
-        logger.error(f"  -> Agent error (attempt {tool_failure_count}/3): {e}")
+        logger.error(f"  -> Agent error (attempt {tool_failure_count}/3): {e}", exc_info=True)
 
         if tool_failure_count >= 3:
             logger.error("  -> Max failures reached, returning fallback response")
             return {
-                "agent_response": (
-                    "I'm sorry, I encountered repeated errors trying to process your request. "
-                    f"Error: {str(e)}\n\nPlease try again or rephrase your request."
-                ),
-                "pending_action": None,
+                "messages": [AIMessage(content=f"I'm sorry, I encountered repeated errors trying to process your request. Error: {str(e)}\\n\\nPlease try again.")],
                 "tool_failure_count": tool_failure_count,
             }
 
-        # Self-correction: retry with error context
         return {
-            "agent_response": None,
-            "pending_action": None,
             "tool_failure_count": tool_failure_count,
             "_retry": True,
         }

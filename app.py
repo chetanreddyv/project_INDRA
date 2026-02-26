@@ -329,12 +329,21 @@ async def agent_daemon(msg: StandardMessage) -> dict:
                 "tool_args": interrupted.get("tool_args", {}),
             }
         else:
-            response = state.values.get("agent_response", "Done!")
-            
-            if response is None:
-                response = "Done!"
+            # Extract the actual AI textual response from the messages state
+            messages = state.values.get("messages", [])
+            response = "Done!"
+            if messages:
+                last_msg = messages[-1]
+                if hasattr(last_msg, "content"):
+                    if isinstance(last_msg.content, str) and last_msg.content:
+                        response = last_msg.content
+                    elif isinstance(last_msg.content, list):
+                        # Gemini sometimes returns [{"type": "text", "text": "..."}]
+                        texts = [item.get("text", "") for item in last_msg.content if isinstance(item, dict) and "text" in item]
+                        if texts:
+                            response = "\n".join(texts)
 
-            if msg.reply_func and response.strip() != "HEARTBEAT_OK":
+            if msg.reply_func and response.strip() != "HEARTBEAT_OK" and response != "Done!":
                 await msg.reply_func(response)
                 logger.info(f"💬 Sent response to {msg.platform} user {msg.user_id}")
             elif response.strip() == "HEARTBEAT_OK":
