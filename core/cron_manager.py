@@ -353,6 +353,7 @@ class CronManager:
         self._arm_timer()
 
     async def _execute_job(self, job: CronJob):
+        start_ms = _now_ms()
         from app import agent_daemon, telegram_client
         from core.lane_manager import lane_manager
         from config.settings import settings
