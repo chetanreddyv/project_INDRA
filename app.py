@@ -5,7 +5,6 @@ Handles Telegram webhooks, security validation, and bridges
 the messaging layer with the LangGraph agentic loop.
 """
 
-import os
 import asyncio
 import logging
 from dotenv import load_dotenv
@@ -15,7 +14,7 @@ load_dotenv()
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from langgraph.types import Command
 
 from config.settings import settings
@@ -332,6 +331,9 @@ async def agent_daemon(msg: StandardMessage) -> dict:
         else:
             response = state.values.get("agent_response", "Done!")
             
+            if response is None:
+                response = "Done!"
+
             if msg.reply_func and response.strip() != "HEARTBEAT_OK":
                 await msg.reply_func(response)
                 logger.info(f"💬 Sent response to {msg.platform} user {msg.user_id}")

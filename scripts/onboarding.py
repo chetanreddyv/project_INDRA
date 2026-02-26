@@ -10,9 +10,7 @@ Usage:
     uv run python onboarding.py --cli     # CLI-only fallback (headless)
 """
 
-import os
 import sys
-import json
 import asyncio
 import webbrowser
 import logging
@@ -104,7 +102,7 @@ def write_env_file(config: dict) -> str:
         "# ── Observability (optional) ─────────────────────────────────",
         f"LANGCHAIN_TRACING_V2={config.get('langchain_tracing', 'false')}",
         f"LANGSMITH_API_KEY={config.get('langsmith_key', '')}",
-        f"LOGFIRE_TOKEN={config.get('logfire_token', '')}",
+
     ]
     content = "\n".join(lines) + "\n"
     ENV_PATH.write_text(content)

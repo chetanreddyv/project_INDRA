@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     # ── Observability (optional) ──────────────────────────────
     langchain_tracing_v2: bool = Field(default=False)
     langsmith_api_key: Optional[str] = Field(default=None)
-    logfire_token: Optional[str] = Field(default=None)
+
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 

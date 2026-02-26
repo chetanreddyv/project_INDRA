@@ -1,11 +1,10 @@
 import asyncio
 import json
 import logging
-import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Optional
 
 try:
     from croniter import croniter
@@ -19,7 +18,7 @@ JOBS_FILE = CRON_DATA_DIR / "jobs.json"
 RUNS_DIR = CRON_DATA_DIR / "runs"
 
 import uuid
-from core.cron_types import CronJob, CronSchedule, CronPayload, CronJobState, CronStore
+from core.cron_types import CronJob, CronSchedule, CronPayload, CronJobState
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -356,8 +355,7 @@ class CronManager:
         self._arm_timer()
 
     async def _execute_job(self, job: CronJob):
-        from app import agent_daemon, checkpointer, telegram_client
-        from nodes.graph import graph
+        from app import agent_daemon, telegram_client
         from core.lane_manager import lane_manager
         from config.settings import settings
         from core.messaging import StandardMessage

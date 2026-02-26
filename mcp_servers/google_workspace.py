@@ -13,22 +13,19 @@ Tool registry
     Used by nodes/approval.py to dispatch approved write actions.
 """
 
-import os
 import sys
-import json
 import uuid
 import base64
 import logging
 import datetime
 from email.mime.text import MIMEText
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple
 from pathlib import Path
 
 # Ensure project root is importable
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dotenv import load_dotenv
-from fastmcp import FastMCP
 from scripts.google_auth_helper import get_google_creds
 from googleapiclient.discovery import build
 
@@ -41,8 +38,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("mcp.google_workspace")
 
-# ── FastMCP server instance (for optional MCP-protocol serving) ──
-mcp = FastMCP("Google Workspace")
+
 
 
 # ══════════════════════════════════════════════════════════════
@@ -125,7 +121,6 @@ def _resolve_label_id(service, label_id_or_name: str) -> str:
 # Gmail Tools
 # ══════════════════════════════════════════════════════════════
 
-@mcp.tool()
 def list_messages(max_results: int = 10, query: str = "", include_spam_trash: bool = False) -> str:
     """List Gmail messages. `query` uses standard Gmail search syntax (e.g. 'from:someone@example.com is:unread')."""
     logger.info(f"🛠️ list_messages(max_results={max_results}, query='{query}')")
@@ -164,7 +159,6 @@ def list_messages(max_results: int = 10, query: str = "", include_spam_trash: bo
         return f"Error listing messages: {e}"
 
 
-@mcp.tool()
 def get_message(message_id: str) -> str:
     """Fetch a single email by message ID and return headers + body."""
     logger.info(f"🛠️ get_message(message_id='{message_id}')")
@@ -197,7 +191,6 @@ def get_message(message_id: str) -> str:
         return f"Error getting message: {e}"
 
 
-@mcp.tool()
 def send_email(
     to: str,
     subject: str,
@@ -235,7 +228,6 @@ def send_email(
         return f"Error sending email: {e}"
 
 
-@mcp.tool()
 def mark_read(message_id: str) -> str:
     """Mark a Gmail message as read."""
     try:
@@ -249,7 +241,6 @@ def mark_read(message_id: str) -> str:
         return f"Error marking read: {e}"
 
 
-@mcp.tool()
 def mark_unread(message_id: str) -> str:
     """Mark a Gmail message as unread."""
     try:
@@ -263,7 +254,6 @@ def mark_unread(message_id: str) -> str:
         return f"Error marking unread: {e}"
 
 
-@mcp.tool()
 def list_labels() -> str:
     """List all Gmail labels."""
     try:
@@ -280,7 +270,6 @@ def list_labels() -> str:
         return f"Error listing labels: {e}"
 
 
-@mcp.tool()
 def add_label(message_id: str, label: str) -> str:
     """Add a label to a Gmail message (by label name or ID)."""
     try:
@@ -295,7 +284,6 @@ def add_label(message_id: str, label: str) -> str:
         return f"Error adding label: {e}"
 
 
-@mcp.tool()
 def remove_label(message_id: str, label: str) -> str:
     """Remove a label from a Gmail message (by label name or ID)."""
     try:
@@ -314,7 +302,6 @@ def remove_label(message_id: str, label: str) -> str:
 # Calendar Tools
 # ══════════════════════════════════════════════════════════════
 
-@mcp.tool()
 def list_events(max_results: int = 10) -> str:
     """List upcoming Google Calendar events.
 
@@ -349,7 +336,6 @@ def list_events(max_results: int = 10) -> str:
         return f"Error listing events: {e}"
 
 
-@mcp.tool()
 def create_event(
     summary: str,
     start_time: str,
@@ -381,7 +367,6 @@ def create_event(
         return f"Error creating event: {e}"
 
 
-@mcp.tool()
 def create_meeting(
     summary: str,
     start_time: str,
@@ -445,6 +430,4 @@ TOOL_REGISTRY: Dict[str, Any] = {
 }
 
 
-# ── Standalone MCP server mode ───────────────────────────────
-if __name__ == "__main__":
-    mcp.run()
+

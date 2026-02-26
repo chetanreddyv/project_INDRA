@@ -15,7 +15,6 @@ the pending action, and routes the graph to the human_approval node.
 The LLM never has the ability to bypass this gate.
 """
 
-import os
 import json
 import logging
 from pathlib import Path
@@ -108,7 +107,6 @@ def _make_write_action_tool(action_name: str, skill_name: str, real_func):
     so the LLM sees proper parameter schemas.
     """
     import inspect
-    import functools
 
     async def _interceptor(**kwargs) -> str:
         logger.warning(

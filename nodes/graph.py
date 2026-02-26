@@ -6,7 +6,7 @@ with SQLite checkpointing for persistent state across restarts.
 """
 
 import logging
-from typing import TypedDict, Optional, Any
+from typing import TypedDict, Optional
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 

@@ -6,8 +6,7 @@ fetch specific webpage contents, returning readable markdown.
 """
 
 import logging
-import urllib.parse
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 import httpx
 from bs4 import BeautifulSoup

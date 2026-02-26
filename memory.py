@@ -6,13 +6,11 @@ fast SQLite WAL session storage, and semantic retrieval
 using Zvec (in-process vector DB).
 """
 
-import json
 import logging
 import asyncio
-import os
 import uuid
 import sqlite3
-from typing import List, Dict, Any
+from typing import List, Dict
 from pathlib import Path
 from datetime import datetime, timezone
 
