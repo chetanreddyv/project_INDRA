@@ -470,7 +470,7 @@ class ZvecMemoryStore:
                 
             prompts = []
             for skill_name in skill_names:
-                skill_file = SKILLS_DIR / f"{skill_name}.md"
+                skill_file = SKILLS_DIR / skill_name / "skill.md"
                 if skill_file.exists():
                     content = skill_file.read_text()
                     prompts.append(f"## {skill_name.replace('_', ' ').title()}\n{content}")
@@ -621,11 +621,11 @@ class ZvecMemoryStore:
         skill_ids = []
 
         # Load all .md files
-        for skill_file in SKILLS_DIR.glob("*.md"):
-            if skill_file.stem == "identity":
+        for skill_file in SKILLS_DIR.glob("*/skill.md"):
+            skill_id = skill_file.parent.name
+            if skill_id == "identity":
                 continue # identity is loaded separately into the system prompt
 
-            skill_id = skill_file.stem  # e.g. "google_workspace"
             content = skill_file.read_text()
             
             name = skill_id
