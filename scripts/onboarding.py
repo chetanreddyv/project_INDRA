@@ -1,5 +1,5 @@
 """
-onboarding.py — Interactive setup wizard for INDRA.
+onboarding.py — Interactive setup wizard for EnterpriseClaw.
 
 Launches a beautiful localhost web UI that walks non-technical users
 through every configuration step.  Validates API keys in real-time
@@ -113,7 +113,7 @@ def write_env_file(config: dict) -> str:
 # 2. FastAPI mini-app
 # ══════════════════════════════════════════════════════════════
 
-app = FastAPI(title="INDRA Setup Wizard")
+app = FastAPI(title="EnterpriseClaw Setup Wizard")
 
 
 class ValidateRequest(BaseModel):
@@ -159,7 +159,7 @@ async def api_complete(req: CompleteRequest):
     return JSONResponse(content={
         "success": True,
         "env_path": env_path,
-        "message": "Configuration saved! You can now start INDRA.",
+        "message": "Configuration saved! You can now start EnterpriseClaw.",
     })
 
 
@@ -173,7 +173,7 @@ WIZARD_HTML = r"""
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>INDRA — Setup Wizard</title>
+<title>EnterpriseClaw — Setup Wizard</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Cinzel:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
@@ -669,7 +669,7 @@ WIZARD_HTML = r"""
   <aside class="sidebar">
     <div class="logo-section">
       <div class="logo-icon">⚡</div>
-      <div class="logo-title">INDRA</div>
+      <div class="logo-title" style="font-size: 20px;">EnterpriseClaw</div>
       <div class="logo-subtitle">Setup Wizard</div>
     </div>
     <ul class="steps" id="stepsList">
@@ -692,17 +692,17 @@ WIZARD_HTML = r"""
     <div class="card page active" id="page-0">
       <div style="text-align:center; margin-bottom:24px;">
         <div class="logo-icon" style="margin:0 auto 16px;">⚡</div>
-        <h1 class="card-title" style="font-size:32px;">Welcome to INDRA</h1>
+        <h1 class="card-title" style="font-size:32px;">Welcome to EnterpriseClaw</h1>
       </div>
       <p class="card-desc" style="text-align:center;">
-        <em>Intelligent Network for Data, Reasoning, and Action</em><br><br>
+        <em>Deterministic Agentic Framework</em><br><br>
         This wizard will guide you through setting up your personal AI assistant
         in a few quick steps. You'll need:
       </p>
       <div class="instructions">
         <ol>
           <li><strong>A Google AI Studio API Key</strong> — powers the intelligence (free tier available)</li>
-          <li><strong>A Telegram Bot Token</strong> — connects INDRA to your Telegram</li>
+          <li><strong>A Telegram Bot Token</strong> — connects EnterpriseClaw to your Telegram</li>
           <li><strong>Your Telegram Chat ID</strong> — restricts access to only you</li>
           <li><strong>Google Workspace credentials</strong> — <em>optional</em>, for email & calendar</li>
         </ol>
@@ -719,7 +719,7 @@ WIZARD_HTML = r"""
     <div class="card page" id="page-1">
       <h2 class="card-title">Google API Key</h2>
       <p class="card-desc">
-        This key powers INDRA's intelligence via the Gemini 2.5 Flash model.
+        This key powers EnterpriseClaw's intelligence via the Gemini 2.5 Flash model.
       </p>
       <div class="instructions">
         <ol>
@@ -746,13 +746,13 @@ WIZARD_HTML = r"""
     <div class="card page" id="page-2">
       <h2 class="card-title">Telegram Bot Token</h2>
       <p class="card-desc">
-        INDRA lives inside Telegram. You'll create a bot via BotFather.
+        EnterpriseClaw lives inside Telegram. You'll create a bot via BotFather.
       </p>
       <div class="instructions">
         <ol>
           <li>Open Telegram and search for <a href="https://t.me/BotFather" target="_blank">@BotFather</a></li>
           <li>Send the command <strong>/newbot</strong></li>
-          <li>Choose a name (e.g., "INDRA") and a username (e.g., "my_indra_bot")</li>
+          <li>Choose a name (e.g., "EnterpriseClaw") and a username (e.g., "my_claw_bot")</li>
           <li>BotFather will reply with your bot token — copy it below</li>
         </ol>
       </div>
@@ -774,7 +774,7 @@ WIZARD_HTML = r"""
     <div class="card page" id="page-3">
       <h2 class="card-title">Telegram Chat ID</h2>
       <p class="card-desc">
-        This restricts who can talk to INDRA. Only your chat ID will be allowed.
+        This restricts who can talk to EnterpriseClaw. Only your chat ID will be allowed.
       </p>
       <div class="instructions">
         <ol>
@@ -802,7 +802,7 @@ WIZARD_HTML = r"""
     <div class="card page" id="page-4">
       <h2 class="card-title">Google Workspace</h2>
       <p class="card-desc">
-        <em>Optional.</em> Enable INDRA to manage your Gmail, Calendar, and Drive.
+        <em>Optional.</em> Enable EnterpriseClaw to manage your Gmail, Calendar, and Drive.
         You can skip this and add it later.
       </p>
       <div class="instructions">
@@ -810,12 +810,12 @@ WIZARD_HTML = r"""
           <li>Go to <a href="https://console.cloud.google.com/apis/credentials" target="_blank">Google Cloud Console → Credentials</a></li>
           <li>Create an <strong>OAuth 2.0 Client ID</strong> (Desktop App type)</li>
           <li>Download the <code style="color:var(--gold);">credentials.json</code> file</li>
-          <li>Place it in the INDRA project root folder</li>
+          <li>Place it in the EnterpriseClaw project root folder</li>
           <li>After setup, run: <code style="color:var(--gold);">uv run python google_auth_helper.py</code></li>
         </ol>
       </div>
       <p class="card-desc" style="font-size:13px; color:var(--text-dim); margin-bottom: 0;">
-        This step requires a Google Cloud project. If you're not sure, skip it — INDRA works
+        This step requires a Google Cloud project. If you're not sure, skip it — EnterpriseClaw works
         perfectly for general chat, coding help, and data analysis without it.
       </p>
       <div class="btn-row">
@@ -831,7 +831,7 @@ WIZARD_HTML = r"""
     <div class="card page" id="page-5">
       <div style="text-align:center;">
         <div class="completion-icon">⚡</div>
-        <h2 class="card-title" style="font-size:28px;">INDRA is Ready</h2>
+        <h2 class="card-title" style="font-size:28px;">EnterpriseClaw is Ready</h2>
         <p class="card-desc">Your configuration has been saved. The thunderbolt is forged.</p>
       </div>
       <div class="config-summary">
@@ -853,13 +853,13 @@ WIZARD_HTML = r"""
           <span class="config-val skipped" id="sumWorkspace">Skipped</span>
         </div>
       </div>
-      <p class="card-desc" style="text-align:center; margin-bottom:8px;">Start INDRA with:</p>
+      <p class="card-desc" style="text-align:center; margin-bottom:8px;">Start EnterpriseClaw with:</p>
       <div class="cmd-block">
         <span>uv run python app.py</span>
         <button class="copy-btn" onclick="copyCmd()">Copy</button>
       </div>
       <p class="card-desc" style="text-align:center; font-size:12px; color:var(--text-dim);">
-        Then open Telegram and message your bot. INDRA will respond. ⚡
+        Then open Telegram and message your bot. EnterpriseClaw will respond. ⚡
       </p>
     </div>
   </main>
@@ -1147,7 +1147,7 @@ WIZARD_HTML = r"""
 async def run_cli():
     """Interactive CLI-only onboarding for headless environments."""
     print("\n" + "═" * 56)
-    print("  ⚡  INDRA — Setup Wizard (CLI Mode)")
+    print("  ⚡  EnterpriseClaw — Setup Wizard (CLI Mode)")
     print("═" * 56)
     print("\nThis wizard will configure your .env file step by step.\n")
 
@@ -1211,7 +1211,7 @@ async def run_cli():
     env_path = write_env_file(config)
     print("═" * 56)
     print(f"  ✅ Configuration saved to {env_path}")
-    print(f"\n  Start INDRA with:  uv run python app.py")
+    print(f"\n  Start EnterpriseClaw with:  uv run python app.py")
     print("═" * 56 + "\n")
 
 
@@ -1225,7 +1225,7 @@ if __name__ == "__main__":
     else:
         import uvicorn
 
-        print("\n  ⚡ INDRA Setup Wizard")
+        print("\n  ⚡ EnterpriseClaw Setup Wizard")
         print("  Opening http://localhost:8888 in your browser...\n")
 
         # Open browser after a short delay (server needs to start)

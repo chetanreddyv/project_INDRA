@@ -84,7 +84,7 @@ def _get_enabled_tools_and_write_actions() -> tuple[list[str], set[str], dict[st
         frontmatter = _parse_skill_frontmatter(skill_file)
         requested_tools = []
 
-        # A. Support INDRA Native Frontmatter (tools: tool_1, tool_2)
+        # A. Support EnterpriseClaw Native Frontmatter (tools: tool_1, tool_2)
         raw_tools = frontmatter.get("tools", "")
         if raw_tools:
             requested_tools.extend([t.strip() for t in raw_tools.split(",") if t.strip()])

@@ -6,7 +6,7 @@ logger = logging.getLogger("mcp.clients")
 
 class ClientInterface(ABC):
     """
-    Abstract base class for all INDRA input/output clients.
+    Abstract base class for all EnterpriseClaw input/output clients.
     Decouples the LangGraph execution engine from the delivery mechanism.
     """
     

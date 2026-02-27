@@ -1,5 +1,5 @@
 """
-web_chat.py — Localhost web chat interface for INDRA.
+web_chat.py — Localhost web chat interface for EnterpriseClaw.
 
 Provides a beautiful single-page chat UI served at /chat that
 communicates with the same LangGraph pipeline used by Telegram.
@@ -43,7 +43,7 @@ CHAT_HTML = r"""
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>INDRA — Chat</title>
+<title>EnterpriseClaw — Chat</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Cinzel:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
@@ -736,8 +736,8 @@ CHAT_HTML = r"""
   <aside class="sidebar">
     <div class="sidebar-logo">
       <div class="sidebar-logo-icon">⚡</div>
-      <div class="sidebar-logo-title">Indra</div>
-      <div class="sidebar-logo-sub">King of the Gods</div>
+      <div class="sidebar-logo-title" style="font-size: 16px;">EnterpriseClaw</div>
+      <div class="sidebar-logo-sub">Production Agent</div>
     </div>
 
     <div class="sidebar-divider"></div>
@@ -784,8 +784,8 @@ CHAT_HTML = r"""
             <circle cx="40" cy="40" r="2.5" fill="#c9a84c" opacity="0.4"/>
           </svg>
         </div>
-        <h2>Indra</h2>
-        <p>Intelligent Network for Data, Reasoning, and Action</p>
+        <h2>EnterpriseClaw</h2>
+        <p>Deterministic Agentic Framework</p>
         <p class="welcome-hint">Type a message to begin</p>
       </div>
 
@@ -799,7 +799,7 @@ CHAT_HTML = r"""
     <!-- Floating Input -->
     <div class="input-float">
       <div class="input-glass">
-        <textarea class="input-field" id="input" placeholder="Message Indra..." rows="1"></textarea>
+        <textarea class="input-field" id="input" placeholder="Message EnterpriseClaw..." rows="1"></textarea>
         <button class="send-btn" id="sendBtn" onclick="sendMessage()">↑</button>
       </div>
     </div>
@@ -871,7 +871,7 @@ CHAT_HTML = r"""
     div.className = `msg ${role}`;
 
     if (role === 'bot') {
-      div.innerHTML = `<div class="msg-name">Indra</div>${renderMarkdown(text)}`;
+      div.innerHTML = `<div class="msg-name">EnterpriseClaw</div>${renderMarkdown(text)}`;
     } else {
       div.textContent = text;
     }
