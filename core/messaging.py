@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Optional
 
 @dataclass
 class IncomingMessageEvent:
@@ -19,3 +18,14 @@ class ResumeEvent:
     platform: str
     user_id: str
     decision: str
+
+@dataclass
+class SystemEvent:
+    """
+    A pure event representing a headless system trigger (e.g., cron job).
+    Designed to spin up an agent thread without a direct user request.
+    """
+    platform: str      # usually 'system' or 'cron'
+    user_id: str       # the thread_id to inject this event into
+    text: str          # the system prompt/trigger instructions
+    deliver: bool      # whether the outbound response should be sent to the user via channel_manager

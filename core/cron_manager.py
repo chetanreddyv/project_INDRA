@@ -354,10 +354,11 @@ class CronManager:
 
     async def _execute_job(self, job: CronJob):
         start_ms = _now_ms()
-        from app import agent_daemon, telegram_client
+        import core.worker as worker
         from core.lane_manager import lane_manager
         from config.settings import settings
-        from core.messaging import StandardMessage
+        from core.messaging import SystemEvent
+        from nodes.graph import build_graph, checkpointer_context
         
         try:
             chat_id = None
@@ -374,26 +375,25 @@ class CronManager:
             user_msg = f"[SYSTEM] CRON EVENT:\n{job.payload.message}"
             
             # Use Future to wait for isolated jobs if we need to log their responses
-            # For "system_event" (main), the response is handled normally by the bot
-            
-            final_response = "Sent to lane"
-            async def reply(response_text: str):
-                nonlocal final_response
-                final_response = response_text
-                if job.payload.deliver:
-                    await telegram_client.send_message(chat_id=chat_id, text=response_text)
-
-            msg = StandardMessage(
+            msg = SystemEvent(
                 platform=f"cron_{job.payload.kind}",
                 user_id=cron_thread_id,
                 text=user_msg,
-                reply_func=reply
+                deliver=job.payload.deliver
             )
             
             logger.info(f"Running job {job.id} ({job.payload.kind})")
-            future = await lane_manager.submit(cron_thread_id, agent_daemon, msg)
             
-            # Wait for the agent daemon to finish the job
+            # We must fetch the global graph instance to run it.
+            # In a real deployed worker architecture, we might not need to import graph from app
+            from app import graph
+            
+            if not graph:
+                 raise Exception("Graph is not initialized. Cannot run cron job.")
+
+            future = await lane_manager.submit(cron_thread_id, worker.system_daemon, graph, msg)
+            
+            # Wait for the worker to finish the job
             result = await future
             
             if result and "error" in result:

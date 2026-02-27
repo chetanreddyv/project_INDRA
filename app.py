@@ -61,6 +61,11 @@ async def lifespan(app: FastAPI):
     telegram_client = TelegramClient(settings.telegram_bot_token)
     channel_manager.register_client("telegram", telegram_client)
     logger.info("✅ Telegram client initialized and registered")
+    
+    # Register Web client
+    from interfaces.web_chat import web_client
+    channel_manager.register_client("web", web_client)
+    logger.info("✅ Web client registered")
 
     # Initialize MemoryGate
     try:

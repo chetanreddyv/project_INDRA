@@ -19,6 +19,23 @@ router = APIRouter()
 async def serve_chat():
     return HTMLResponse(CHAT_HTML)
 
+from interfaces.base import ClientInterface
+from typing import Dict, Any
+
+class WebClient(ClientInterface):
+    """
+    Adapter for the local Web GUI.
+    Currently just logs output so the frontend can poll it, 
+    but designed to be extended with WebSockets or SSEs.
+    """
+    async def send_message(self, thread_id: str, content: str) -> None:
+        # In a real app, this would push via WebSocket to `thread_id`
+        logger.info(f"🖥️ [WEB OUT] {thread_id}: {content[:100]}")
+
+    async def request_approval(self, thread_id: str, tool_name: str, args: Dict[str, Any]) -> None:
+        logger.info(f"🖥️ [WEB HITL] {thread_id} needs approval for {tool_name}")
+
+web_client = WebClient()
 
 CHAT_HTML = r"""
 <!DOCTYPE html>
