@@ -30,27 +30,84 @@ def _load_mcp_config() -> dict:
         return json.loads(MCP_CONFIG_PATH.read_text())
     return {}
 
+import re
+
+def _parse_skill_frontmatter(skill_path: Path) -> dict:
+    """Extracts YAML frontmatter from a Markdown file, including JSON metadata blocks."""
+    content = skill_path.read_text(encoding="utf-8")
+    match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
+    if not match:
+        return {}
+
+    frontmatter = {}
+    for line in match.group(1).strip().split('\n'):
+        if ':' in line:
+            key, val = line.split(':', 1)
+            val = val.strip().strip("'\"")
+            
+            # Attempt to parse inline JSON (used by Nanobot/OpenClaw metadata)
+            if val.startswith('{') and val.endswith('}'):
+                try:
+                    val = json.loads(val)
+                except json.JSONDecodeError:
+                    pass
+            frontmatter[key.strip()] = val
+            
+    return frontmatter
+
 def _get_enabled_tools_and_write_actions() -> tuple[list[str], set[str], dict[str, str]]:
     """
-    Return enabled tools, write actions, and action-to-skill mapping based on mcp_config.json.
+    Returns enabled tools, write actions, and action-to-skill mapping.
+    Combines static mcp_config.json with dynamically auto-loaded SKILL.md files.
     """
-    config = _load_mcp_config()
-    enabled_tools = []
+    enabled_tools = set()
     write_actions = set()
     action_skill_map = {}
     
+    # 1. Load Static / Core configs (from mcp_config.json)
+    config = _load_mcp_config()
     for skill_name, skill_cfg in config.items():
         if isinstance(skill_cfg, dict) and skill_cfg.get("enabled", True):
-            skill_tools = skill_cfg.get("tools", [])
-            skill_write_actions = skill_cfg.get("write_actions", [])
-            
-            enabled_tools.extend(skill_tools)
-            write_actions.update(skill_write_actions)
-            
-            for action in skill_tools:
+            for action in skill_cfg.get("tools", []):
+                enabled_tools.add(action)
                 action_skill_map[action] = skill_name
-                
-    return enabled_tools, write_actions, action_skill_map
+            for action in skill_cfg.get("write_actions", []):
+                write_actions.add(action)
+
+    # 2. Universal Auto-Loader: Scan all skill.md files
+    # Case-insensitive match for skill.md or SKILL.md
+    for skill_file in SKILLS_DIR.rglob("*"):
+        if skill_file.name.lower() != "skill.md":
+            continue
+            
+        skill_name = skill_file.parent.name
+        frontmatter = _parse_skill_frontmatter(skill_file)
+        requested_tools = []
+
+        # A. Support INDRA Native Frontmatter (tools: tool_1, tool_2)
+        raw_tools = frontmatter.get("tools", "")
+        if raw_tools:
+            requested_tools.extend([t.strip() for t in raw_tools.split(",") if t.strip()])
+
+        # B. Support Nanobot/OpenClaw Bridge
+        meta_json = frontmatter.get("metadata", {})
+        if isinstance(meta_json, dict):
+            # If the skill requires CLI binaries, it inherently needs the 'exec_command' tool
+            framework_meta = meta_json.get("nanobot", meta_json.get("openclaw", {}))
+            if framework_meta.get("requires", {}).get("bins"):
+                if "exec_command" not in requested_tools:
+                    requested_tools.append("exec_command")
+
+        # 3. Register Discovered Tools
+        for action in requested_tools:
+            enabled_tools.add(action)
+            action_skill_map[action] = skill_name
+            
+            # Safety Fallback: Automatically treat 'exec_command' as a write action requiring HITL
+            if action in ["exec_command", "write_file", "delete_file"]:
+                write_actions.add(action)
+
+    return list(enabled_tools), write_actions, action_skill_map
 
 async def agent_node(state: dict) -> dict:
     """
