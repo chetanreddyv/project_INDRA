@@ -21,7 +21,9 @@ from config.settings import settings
 from interfaces.telegram import TelegramClient
 from nodes.graph import build_graph, checkpointer_context
 from core.lane_manager import lane_manager
-from core.messaging import StandardMessage, ResumeMessage
+from core.messaging import IncomingMessageEvent, ResumeEvent
+from core.channel_manager import channel_manager
+import core.worker as worker
 
 # ── Logging ──────────────────────────────────────────────────
 logging.basicConfig(
@@ -57,7 +59,8 @@ async def lifespan(app: FastAPI):
 
     # Initialize Telegram client
     telegram_client = TelegramClient(settings.telegram_bot_token)
-    logger.info("✅ Telegram client initialized")
+    channel_manager.register_client("telegram", telegram_client)
+    logger.info("✅ Telegram client initialized and registered")
 
     # Initialize MemoryGate
     try:
@@ -146,23 +149,15 @@ async def _poll_telegram():
 
                 logger.info(f"📩 Message from {chat_id}: {text[:100]}")
 
-                # Show typing and run graph SEQUENTIALLY via LaneManager
+                # Show typing indicator
                 await telegram_client.send_typing_action(chat_id)
 
-                async def reply(response_text: str):
-                    await telegram_client.send_message(chat_id=chat_id, text=response_text)
-
-                async def approve(action_summary: str, thread_id: str):
-                    await telegram_client.send_approval_buttons(chat_id=chat_id, action_summary=action_summary, thread_id=thread_id)
-
-                msg = StandardMessage(
+                msg = IncomingMessageEvent(
                     platform="telegram",
                     user_id=str(chat_id),
-                    text=text,
-                    reply_func=reply,
-                    approval_func=approve
+                    text=text
                 )
-                await lane_manager.submit(str(chat_id), agent_daemon, msg)
+                await lane_manager.submit(str(chat_id), worker.agent_daemon, graph, msg)
 
         except asyncio.CancelledError:
             logger.info("📡 Polling stopped")
@@ -255,21 +250,13 @@ async def webhook(request: Request):
         # Show typing indicator
         await telegram_client.send_typing_action(chat_id)
 
-        async def reply(response_text: str):
-            await telegram_client.send_message(chat_id=chat_id, text=response_text)
-
-        async def approve(action_summary: str, thread_id: str):
-            await telegram_client.send_approval_buttons(chat_id=chat_id, action_summary=action_summary, thread_id=thread_id)
-
-        msg = StandardMessage(
+        msg = IncomingMessageEvent(
             platform="telegram",
             user_id=str(chat_id),
-            text=text,
-            reply_func=reply,
-            approval_func=approve
+            text=text
         )
         # Run the graph sequentially via LaneManager
-        await lane_manager.submit(str(chat_id), agent_daemon, msg)
+        await lane_manager.submit(str(chat_id), worker.agent_daemon, graph, msg)
 
         return {"status": "processing"}
 
@@ -277,94 +264,9 @@ async def webhook(request: Request):
 
 
 # ==========================================================
-# 5. Graph Execution
 # ==========================================================
-
-async def agent_daemon(msg: StandardMessage) -> dict:
-    """
-    Unified LangGraph runner. Processes the message and returns a dict with the result.
-    If callbacks are provided in msg, they are called immediately.
-    """
-    config = {"configurable": {"thread_id": msg.user_id}}
-
-    try:
-        # Stream through the graph
-        async for event in graph.astream(
-            {
-                "chat_id": msg.user_id,
-                "user_input": msg.text,
-                "tool_failure_count": 0,
-            },
-            config=config,
-            stream_mode="updates",
-        ):
-            logger.debug(f"Graph event ({msg.platform}): {event}")
-
-        # Check final state
-        state = await graph.aget_state(config)
-
-        if state.next:
-            interrupted = state.tasks[0].interrupts[0].value
-            tool_args = interrupted.get("tool_args", {})
-            args_text = (
-                "\n".join(f"  • *{k}*: `{v}`" for k, v in tool_args.items())
-                if tool_args
-                else ""
-            )
-            action_summary = (
-                f"*Action:* `{interrupted.get('action', 'unknown')}`\n"
-                f"*Skill:* `{interrupted.get('skill', 'unknown')}`\n\n"
-                f"{interrupted.get('details', '')}"
-                + (f"\n\n*Arguments:*\n{args_text}" if args_text else "")
-            )
-            
-            if msg.approval_func:
-                await msg.approval_func(action_summary, msg.user_id)
-                logger.info(f"🔐 HITL: Sent approval request to {msg.platform} user {msg.user_id}")
-            
-            return {
-                "approval_required": True,
-                "action": interrupted.get("action", "unknown"),
-                "details": interrupted.get("details", ""),
-                "tool_args": interrupted.get("tool_args", {}),
-            }
-        else:
-            # Extract the actual AI textual response from the messages state
-            messages = state.values.get("messages", [])
-            response = "Done!"
-            if messages:
-                last_msg = messages[-1]
-                if hasattr(last_msg, "content"):
-                    if isinstance(last_msg.content, str) and last_msg.content:
-                        response = last_msg.content
-                    elif isinstance(last_msg.content, list):
-                        # Gemini sometimes returns [{"type": "text", "text": "..."}]
-                        texts = [item.get("text", "") for item in last_msg.content if isinstance(item, dict) and "text" in item]
-                        if texts:
-                            response = "\n".join(texts)
-
-            if msg.reply_func and response.strip() != "HEARTBEAT_OK" and response != "Done!":
-                await msg.reply_func(response)
-                logger.info(f"💬 Sent response to {msg.platform} user {msg.user_id}")
-            elif response.strip() == "HEARTBEAT_OK":
-                logger.info(f"🔇 Suppressed HEARTBEAT_OK from {msg.platform} user {msg.user_id}")
-
-            # Trigger memorygate in background
-            import asyncio
-            asyncio.create_task(_run_memorygate(msg.user_id, msg.text, response))
-            
-            return {"response": response}
-
-    except Exception as e:
-        logger.error(f"❌ Graph execution error ({msg.platform}): {e}", exc_info=True)
-        error_text = f"❌ Sorry, I encountered an error:\n{str(e)[:500]}"
-        if msg.reply_func:
-            try:
-                await msg.reply_func(error_text)
-            except Exception:
-                await msg.reply_func("❌ An error occurred.")
-        return {"error": str(e)[:500]}
-
+# 5. Background Handlers
+# ==========================================================
 
 async def _handle_callback_query(callback_query: dict):
     """
@@ -406,7 +308,6 @@ async def _handle_callback_query(callback_query: dict):
 
     if decision == "edit":
         # For edit, we wait for the user's next message (it'll come through /webhook)
-        # We store a flag so the next message is treated as an edit instruction
         # For now, just inform the user
         await telegram_client.send_message(
             chat_id=chat_id,
@@ -414,78 +315,31 @@ async def _handle_callback_query(callback_query: dict):
         )
         return {"status": "awaiting_edit"}
 
-    async def reply(response_text: str):
-        await telegram_client.send_message(chat_id=chat_id, text=response_text)
-
-    msg = ResumeMessage(
+    msg = ResumeEvent(
         platform="telegram",
         user_id=thread_id,
-        decision=decision,
-        reply_func=reply
+        decision=decision
     )
 
     # Resume the graph sequentially via LaneManager
     await lane_manager.submit(
         thread_id, 
-        resume_daemon, 
+        worker.resume_daemon, 
+        graph,
         msg
     )
 
     return {"status": "resumed"}
 
 
-async def resume_daemon(msg: ResumeMessage) -> dict:
-    """
-    Unified LangGraph resumer.
-    """
-    config = {"configurable": {"thread_id": msg.user_id}}
-    try:
-        async for event in graph.astream(
-            Command(resume=msg.decision),
-            config=config,
-            stream_mode="updates",
-        ):
-            logger.debug(f"Resume event ({msg.platform}): {event}")
 
-        state = await graph.aget_state(config)
-        if not state.next:
-            response = state.values.get("agent_response", "Done!")
-            if msg.reply_func:
-                await msg.reply_func(response)
-            return {"response": response}
-        else:
-            return {"status": "paused_again"}
-
-    except Exception as e:
-        logger.error(f"❌ Resume error ({msg.platform}): {e}", exc_info=True)
-        if msg.reply_func:
-            await msg.reply_func(f"❌ Error resuming action:\n`{str(e)[:500]}`")
-        return {"error": str(e)[:500]}
-
-
-# ==========================================================
-# 6. Background Memory Gate
-# ==========================================================
-
-async def _run_memorygate(thread_id: str, user_input: str, agent_response: str):
-    """
-    Background task: extract context from the conversation
-    and store in long-term memory.
-    """
-    try:
-        from memory import memorygate
-        await memorygate.process(thread_id, user_input, agent_response)
-        # Background sync Zvec vector index AFTER SQLite writes are done
-        await memorygate.store.sync_pending_memories()
-    except Exception as e:
-        logger.error(f"Memorygate error: {e}", exc_info=True)
 
 
 @app.post("/api/v1/chat/{thread_id}")
 async def chat_endpoint(thread_id: str, request: Request):
     """
     Standardized Gateway API for chat clients.
-    Accepts generic POST requests and runs the LangGraph deterministically.
+    Validates payload, pushes to the Event Bus (LaneManager), and returns instantly.
     """
     if not graph:
         return JSONResponse({"error": "Graph not initialized"}, status_code=503)
@@ -495,111 +349,43 @@ async def chat_endpoint(thread_id: str, request: Request):
     if not user_input:
         return JSONResponse({"error": "Empty message"}, status_code=400)
 
-    logger.info(f"🌐 Gateway API request from {thread_id}: {user_input[:100]}")
+    logger.info(f"🌐 Gateway API request queued from {thread_id}: {user_input[:100]}")
 
-    config = {"configurable": {"thread_id": thread_id}}
-    state_updates = {
-        "chat_id": thread_id,
-        "user_input": user_input,
-        "tool_failure_count": 0,
-    }
-
-    try:
-        # Run the graph until it finishes or hits an interrupt()
-        result = await graph.ainvoke(state_updates, config=config)
-        
-        # Check if the graph paused due to a HITL interrupt()
-        state_snapshot = await graph.aget_state(config)
-        
-        if state_snapshot.next:
-            # The graph is paused waiting for user input!
-            pending_action = state_snapshot.tasks[0].interrupts[0].value
-            return {
-                "status": "requires_approval",
-                "pending_tool": pending_action
-            }
-            
-        # Otherwise, the graph finished successfully
-        # Extract the semantic response
-        messages = result.get("messages", [])
-        response_text = "Done!"
-        if messages:
-            last_msg = messages[-1]
-            if hasattr(last_msg, "content"):
-                if isinstance(last_msg.content, str) and last_msg.content:
-                    response_text = last_msg.content
-                elif isinstance(last_msg.content, list):
-                    texts = [item.get("text", "") for item in last_msg.content if isinstance(item, dict) and "text" in item]
-                    if texts:
-                        response_text = "\n".join(texts)
-                        
-        # Trigger memory extraction in the background
-        import asyncio
-        asyncio.create_task(_run_memorygate(thread_id, user_input, response_text))
-
-        return {
-            "status": "completed",
-            "response": response_text
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Gateway API error: {e}", exc_info=True)
-        return JSONResponse({"error": str(e)[:500]}, status_code=500)
+    msg = IncomingMessageEvent(
+        platform="web",
+        user_id=thread_id,
+        text=user_input
+    )
+    
+    # Push to queue and return instantly
+    await lane_manager.submit(thread_id, worker.agent_daemon, graph, msg)
+    
+    return {"status": "queued"}
 
 
 @app.post("/api/v1/chat/{thread_id}/resume")
 async def resume_hitl_endpoint(thread_id: str, request: Request):
     """
     Standardized Gateway API for resuming paused execution.
-    Injects a HITL decision (approve/reject/edit) into the paused graph.
+    Pushes ResumeEvent to Event Bus and returns instantly.
     """
     if not graph:
         return JSONResponse({"error": "Graph not initialized"}, status_code=503)
 
     body = await request.json()
-    decision = body.get("action", body.get("decision", "reject")) # accept either for back-compat
-    feedback = body.get("feedback", "")
+    decision = body.get("action", body.get("decision", "reject"))
 
-    logger.info(f"🌐 Gateway API resume: {decision} for thread {thread_id}")
+    logger.info(f"🌐 Gateway API resume queued: {decision} for thread {thread_id}")
 
-    config = {"configurable": {"thread_id": thread_id}}
+    msg = ResumeEvent(
+        platform="web",
+        user_id=thread_id,
+        decision=decision
+    )
 
-    try:
-        # Verify the graph is actually paused
-        state_snapshot = await graph.aget_state(config)
-        if not state_snapshot.next:
-            return JSONResponse({"error": "No pending actions for this thread."}, status_code=400)
-            
-        # For simplicity, if feedback exists and it's an edit, we can pass it
-        # But our simple approval node currently just takes the string action "approve" "reject" "edit"
-        # Since Telegram sends "approve", we will invoke with the string decision directly.
-        
-        result = await graph.ainvoke(Command(resume=decision), config=config)
-        
-        # Check if it paused again (unlikely unless edit loops back)
-        new_snapshot = await graph.aget_state(config)
-        if new_snapshot.next:
-            return {
-                "status": "requires_approval", 
-                "pending_tool": new_snapshot.tasks[0].interrupts[0].value
-            }
-            
-        messages = result.get("messages", [])
-        response_text = "Done!"
-        if messages:
-            last_msg = messages[-1]
-            if hasattr(last_msg, "content"):
-                if isinstance(last_msg.content, str) and last_msg.content:
-                    response_text = last_msg.content
-
-        return {
-            "status": "completed",
-            "response": response_text
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Gateway resume error: {e}", exc_info=True)
-        return JSONResponse({"error": str(e)[:500]}, status_code=500)
+    await lane_manager.submit(thread_id, worker.resume_daemon, graph, msg)
+    
+    return {"status": "queued"}
 
 
 # ==========================================================

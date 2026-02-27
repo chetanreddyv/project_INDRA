@@ -1,30 +1,21 @@
 from dataclasses import dataclass
-from typing import Callable, Awaitable, Optional
+from typing import Optional
 
 @dataclass
-class StandardMessage:
+class IncomingMessageEvent:
     """
-    A unified message format decoupled from specific platform SDKs.
-    Follows the Nanobot philosophy by reducing integration complexity.
-    """
-    platform: str          # e.g., "telegram", "web"
-    user_id: str           # The user id or thread id for tracking state
-    text: str              # The user's input/prompt
-    
-    # Async callback to send a normal text response directly back
-    reply_func: Optional[Callable[[str], Awaitable[None]]] = None
-    
-    # Async callback to send human-in-the-loop (HITL) approval requests
-    approval_func: Optional[Callable[[str, str], Awaitable[None]]] = None
-
-@dataclass
-class ResumeMessage:
-    """
-    A unified format for resuming a paused agent.
+    A pure event representing an incoming message from a client.
+    Contains NO callbacks, ensuring complete decoupling.
     """
     platform: str
     user_id: str
-    decision: str          # "approve" or "reject"
-    
-    # Async callback to send normal text response after resumption
-    reply_func: Optional[Callable[[str], Awaitable[None]]] = None
+    text: str
+
+@dataclass
+class ResumeEvent:
+    """
+    A pure event representing a Human-In-The-Loop resumption request.
+    """
+    platform: str
+    user_id: str
+    decision: str
