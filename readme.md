@@ -33,7 +33,7 @@ EnterpriseClaw solves the "Orchestrator Clash" by splitting the brain from the b
 Clone the repository and install dependencies using `uv` (recommended for strict lockfile management):
 
 ```bash
-git clone https://github.com/yourusername/EnterpriseClaw.git
+git clone https://github.com/chetanreddyv/EnterpriseClaw.git
 cd EnterpriseClaw
 uv sync
 
