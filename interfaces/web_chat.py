@@ -29,6 +29,8 @@ class WebClient(ClientInterface):
     but designed to be extended with WebSockets or SSEs.
     """
     async def send_message(self, thread_id: str, content: str) -> None:
+        # TODO: Upgrade to use FastAPI's StreamingResponse (Server-Sent Events) or WebSockets
+        # to instantly push the message (e.g. 🔔 **[Subagent Report]**) to the browser.
         # In a real app, this would push via WebSocket to `thread_id`
         logger.info(f"🖥️ [WEB OUT] {thread_id}: {content[:100]}")
 

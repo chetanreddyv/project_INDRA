@@ -77,7 +77,10 @@ async def agent_daemon(graph, event: IncomingMessageEvent) -> dict:
         try:
             await channel_manager.send_message(event.platform, event.user_id, error_text)
         except Exception:
-            pass
+            # The channel adapter is dead. Inject the error into the state 
+            # so it's not lost forever.
+            logger.critical(f"FATAL: Channel manager failed to deliver error for thread {event.user_id}")
+            # (Optional: push to a Redis dead-letter queue here)
         return {"error": str(e)[:500]}
 
 
@@ -197,7 +200,10 @@ async def system_daemon(graph, event: SystemEvent) -> dict:
                     f"❌ Background task error:\n{str(e)[:500]}"
                 )
             except Exception:
-                pass
+                # The channel adapter is dead. Inject the error into the state 
+                # so it's not lost forever.
+                logger.critical(f"FATAL: Channel manager failed to deliver system error for thread {event.user_id}")
+                # (Optional: push to a Redis dead-letter queue here)
         return {"error": str(e)[:500]}
 
 async def _run_memorygate(thread_id: str, user_input: str, agent_response: str):

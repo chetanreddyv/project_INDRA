@@ -2,8 +2,34 @@ import asyncio
 import logging
 from pydantic import Field
 from langchain_core.tools import tool
+from langchain_core.runnables import RunnableConfig
+from langchain_core.messages import AIMessage
 
 logger = logging.getLogger(__name__)
+
+async def _monitor_background_process(process, command: str, thread_id: str):
+    """Waits for a background process to finish and notifies the main agent."""
+    stdout, stderr = await process.communicate()
+    output = stdout.decode('utf-8', errors='replace').strip()
+    error = stderr.decode('utf-8', errors='replace').strip()
+    
+    # Format the completion notification
+    msg = f"🔔 **[Background Process Complete]**\nCommand: `{command}`\nExit Code: {process.returncode}"
+    if output: msg += f"\n\nSTDOUT:\n```\n{output[:1000]}\n```"
+    if error: msg += f"\n\nSTDERR:\n```\n{error[:1000]}\n```"
+
+    # Inject into LangGraph state!
+    if thread_id:
+        try:
+            from nodes.graph import checkpointer_context, build_graph
+            async with checkpointer_context() as cp:
+                main_graph = build_graph(checkpointer=cp)
+                await main_graph.aupdate_state(
+                    {"configurable": {"thread_id": thread_id}},
+                    {"messages": [AIMessage(content=msg)]}
+                )
+        except Exception as e:
+            logger.error(f"Failed to push background process result for {thread_id}: {e}")
 
 @tool
 async def exec_command(
@@ -18,7 +44,8 @@ async def exec_command(
     background: bool = Field(
         ..., 
         description="Set to True to run asynchronously in the background, otherwise False."
-    )
+    ),
+    config: RunnableConfig = None
 ) -> str:
     """
     Executes a shell command on the host system. 
@@ -26,7 +53,9 @@ async def exec_command(
     """
     logger.info(f"Executing shell command: `{command}` (Background: {background}, Timeout: {timeout_seconds}s)")
     
-    # --- FIRE AND FORGET MODE ---
+    thread_id = config.get("configurable", {}).get("thread_id") if config else None
+    
+    # --- FIRE AND FORGET MODE (NOW WITH MONITORING) ---
     if background:
         try:
             process = await asyncio.create_subprocess_shell(
@@ -34,7 +63,8 @@ async def exec_command(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            return f"Background process started successfully with PID: {process.pid}"
+            asyncio.create_task(_monitor_background_process(process, command, thread_id))
+            return f"Background process started successfully with PID: {process.pid}. You will be notified when it finishes."
         except Exception as e:
             return f"Failed to start background process: {str(e)}"
 

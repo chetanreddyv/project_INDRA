@@ -19,10 +19,11 @@ EnterpriseClaw solves the "Orchestrator Clash" by splitting the brain from the b
 ## ✨ Core Features
 
 * **🛡️ True Human-In-The-Loop (HITL):** Dangerous "Write" operations (like `exec_command` or `send_email`) instantly pause the LangGraph state. The LLM's intent is routed to the user (via Telegram or Web) for approval, rejection, or feedback. Rejections are fed *back* to the LLM so it can course-correct.
-* **🧠 Enterprise-Grade Memory (MemoryGate):** Unlike standard frameworks that dump agent memory into a single, fragile `MEMORY.md` file, EnterpriseClaw uses a dual-layer memory architecture powered by SQLite and Zvec vector indexing for lightning-fast, semantic context retrieval.
-* **🔌 Universal Skill Auto-Loader:** No more massive configuration files. Drop a `SKILL.md` file into the `/skills` directory. The framework parses the YAML frontmatter, dynamically binds the requested Python tools, and injects the context at runtime. (Fully compatible with Nanobot/OpenClaw metadata formats).
+* **🧠 Enterprise-Grade Memory (MemoryGate):** Unlike standard frameworks that dump agent memory into a single, fragile markdown file, EnterpriseClaw uses a dual-layer memory architecture powered by SQLite and Zvec vector indexing for lightning-fast, semantic context retrieval.
+* **🔌 The Standard Library & Skill Auto-Loader:** EnterpriseClaw comes pre-equipped with a "Standard Library" of core capabilities (`exec_command`, `web_search`). You don't need to specify these in configuration files—the agent intrinsically knows how to use them, and they are permanently protected by HITL. For custom APIs, simply drop a `SKILL.md` file into the `/skills` directory and the framework binds Python tools on the fly.
 * **🚦 The Gateway Pattern:** The core execution engine has zero knowledge of the delivery channel. A central `ChannelManager` translates abstract agent actions into UI-specific formats (Telegram Inline Keyboards, Web UI buttons, etc.).
-* **⏳ Background & Cron Tasks:** The agent can spawn asynchronous, fire-and-forget background tasks or schedule recurring cron jobs without blocking the main conversational thread.
+* **⏳ True LangGraph Subagents:** Advanced background operations. Instead of simple fire-and-forget scripts, EnterpriseClaw spawns ephemeral LangGraph execute loops for complex background research. When a subagent finishes, it securely injects its report directly into the primary thread's checkpointer state.
+* **👀 Background Process Monitoring:** When the agent executes a background shell command, it doesn't just blind-fire it. EnterpriseClaw attaches an async monitor to capture `stdout`/`stderr` and automatically notifies the primary agent thread the moment the process concludes.
 
 ---
 
@@ -65,7 +66,7 @@ uv run python app.py
 
 ## 🧠 Rethinking Agentic Memory: The MemoryGate Engine
 
-Standard frameworks like Nanobot and OpenClaw rely on reading and writing to plain text `.md` files to remember user preferences. This approach is slow, consumes massive amounts of the LLM's token context limit, and is prone to corruption during parallel execution.
+Other typical local agent frameworks rely on reading and writing to plain text `.md` files to remember user preferences. This approach is slow, consumes massive amounts of the LLM's token context limit, and is prone to corruption during parallel execution.
 
 EnterpriseClaw introduces **MemoryGate**, a highly-scalable, dual-layer memory architecture:
 
@@ -105,13 +106,12 @@ Always verify the current directory before running commands.
 
 ## 🏗️ Architecture Deep Dive
 
-EnterpriseClaw is built on three distinct layers:
+EnterpriseClaw is built on three distinct layers, providing an enterprise-grade execution environment superior to typical monolithic agent loops:
 
 1. **The Gateway API (`app.py`):** Fast, stateless endpoints that receive inputs and push `IncomingMessageEvent` payloads to the bus.
-2. **The Control Plane (`core/worker.py` & LangGraph):** A continuous background loop that consumes events, steps through the LangGraph state machine, executes read-only tools, and suspends state to SQLite when HITL is required.
-3. **The Channel Manager (`core/channel_manager.py`):** Intercepts outputs from the Control Plane and formats them for the specific user interface (e.g., rendering an "Approve/Reject" button in Telegram).
-
----
+2. **The Control Plane (`core/worker.py` & LangGraph):** A continuous background loop that consumes events, steps through the LangGraph state machine, executes tools, and suspends state to SQLite when HITL is required. 
+3. **The Subagent Plane (`nodes/subagents.py`):** Dedicated, ephemeral LangGraph loops for background tasks. Unlike standard `while` loop subagents that vanish if a server restarts, EnterpriseClaw's background tasks run within the LangGraph ecosystem and cleanly inject their outcomes into the primary conversation thread.
+4. **The Channel Manager (`core/channel_manager.py`):** Intercepts outputs from the Control Plane and formats them for the specific user interface (e.g., rendering an "Approve/Reject" button in Telegram).
 
 ## 🤝 Contributing
 

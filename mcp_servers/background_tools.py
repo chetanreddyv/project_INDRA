@@ -14,30 +14,49 @@ logger = logging.getLogger(__name__)
 
 async def run_research_task(query: str, thread_id: str):
     """
-    Background task that actually executes the research.
+    Background task that actually executes the research via LangGraph.
     """
-    logger.info(f"[Background] Starting research for '{query}' on thread {thread_id}")
+    logger.info(f"[Background] Starting true subagent for '{query}' on thread {thread_id}")
     
-    # Simulate a long-running research task
-    await asyncio.sleep(10)
-    
-    # In a real implementation we would run a SubGraph here.
-    summary = f"Research completed for '{query}'.\n\n(This is a simulated background subagent response. In production, this would execute a dedicated LangGraph subgraph.)"
-
-    # Inject the findings back into the main thread state
     try:
+        from nodes.subagents import build_researcher_graph
+        researcher_graph = build_researcher_graph()
+        
+        sub_state = {
+            "messages": [], 
+            "user_input": f"Research this thoroughly: {query}",
+            "chat_id": f"subagent_{thread_id}",
+            "tool_failure_count": 0
+        }
+        
+        # We invoke without a checkpointer, making it an ephemeral execution
+        result = await researcher_graph.ainvoke(sub_state)
+        
+        summary = result["messages"][-1].content
+        
         from nodes.graph import checkpointer_context, build_graph
         async with checkpointer_context() as cp:
-            graph = build_graph(checkpointer=cp)
+            main_graph = build_graph(checkpointer=cp)
             
-            await graph.aupdate_state(
+            await main_graph.aupdate_state(
                 {"configurable": {"thread_id": thread_id}},
-                {"messages": [AIMessage(content=f"🔔 **[Background Task Complete]**\n\n{summary}")]}
+                {"messages": [AIMessage(content=f"🔔 **[Subagent Report]**\n\n{summary}")]}
             )
             logger.info(f"[Background] Injected research results for thread {thread_id}")
             
     except Exception as e:
-        logger.error(f"[Background] Failed to inject findings: {e}")
+        logger.error(f"[Background] Subagent task failed: {e}", exc_info=True)
+        # Attempt to inject error report
+        try:
+            from nodes.graph import checkpointer_context, build_graph
+            async with checkpointer_context() as cp:
+                main_graph = build_graph(checkpointer=cp)
+                await main_graph.aupdate_state(
+                    {"configurable": {"thread_id": thread_id}},
+                    {"messages": [AIMessage(content=f"🔔 **[Subagent Task Failed]**\nAn error occurred: {str(e)}")]}
+                )
+        except Exception:
+            pass
 
 
 @tool

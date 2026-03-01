@@ -60,9 +60,15 @@ def _get_enabled_tools_and_write_actions() -> tuple[list[str], set[str], dict[st
     Returns enabled tools, write actions, and action-to-skill mapping.
     Combines static mcp_config.json with dynamically auto-loaded SKILL.md files.
     """
-    enabled_tools = set()
-    write_actions = set()
-    action_skill_map = {}
+    # 0. The Standard Library (Core Capabilities available to all skills)
+    enabled_tools = {"exec_command", "web_search", "web_fetch", "delegate_research"}
+    write_actions = {"exec_command"} # Always protect dangerous core tools
+    action_skill_map = {
+        "exec_command": "core",
+        "web_search": "core", 
+        "web_fetch": "core",
+        "delegate_research": "core"
+    }
     
     # 1. Load Static / Core configs (from mcp_config.json)
     config = _load_mcp_config()
