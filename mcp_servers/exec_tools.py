@@ -3,11 +3,11 @@ import logging
 from pydantic import Field
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
-from langchain_core.messages import AIMessage
+import httpx
 
 logger = logging.getLogger(__name__)
 
-async def _monitor_background_process(process, command: str, thread_id: str):
+async def _monitor_background_process(process, command: str, thread_id: str, platform: str):
     """Waits for a background process to finish and notifies the main agent."""
     stdout, stderr = await process.communicate()
     output = stdout.decode('utf-8', errors='replace').strip()
@@ -18,15 +18,17 @@ async def _monitor_background_process(process, command: str, thread_id: str):
     if output: msg += f"\n\nSTDOUT:\n```\n{output[:1000]}\n```"
     if error: msg += f"\n\nSTDERR:\n```\n{error[:1000]}\n```"
 
-    # Inject into LangGraph state!
+    # Inject via Universal Gateway
     if thread_id:
         try:
-            from nodes.graph import checkpointer_context, build_graph
-            async with checkpointer_context() as cp:
-                main_graph = build_graph(checkpointer=cp)
-                await main_graph.aupdate_state(
-                    {"configurable": {"thread_id": thread_id}},
-                    {"messages": [AIMessage(content=msg)]}
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    f"http://localhost:8000/api/v1/system/{thread_id}/notify",
+                    json={
+                        "message": msg,
+                        "platform": platform
+                    },
+                    timeout=10.0
                 )
         except Exception as e:
             logger.error(f"Failed to push background process result for {thread_id}: {e}")
@@ -54,6 +56,7 @@ async def exec_command(
     logger.info(f"Executing shell command: `{command}` (Background: {background}, Timeout: {timeout_seconds}s)")
     
     thread_id = config.get("configurable", {}).get("thread_id") if config else None
+    platform = config.get("configurable", {}).get("platform", "telegram") if config else "telegram"
     
     # --- FIRE AND FORGET MODE (NOW WITH MONITORING) ---
     if background:
@@ -63,7 +66,7 @@ async def exec_command(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            asyncio.create_task(_monitor_background_process(process, command, thread_id))
+            asyncio.create_task(_monitor_background_process(process, command, thread_id, platform))
             return f"Background process started successfully with PID: {process.pid}. You will be notified when it finishes."
         except Exception as e:
             return f"Failed to start background process: {str(e)}"

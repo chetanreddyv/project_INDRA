@@ -20,7 +20,7 @@ def _get_tool_registry() -> dict:
 
 import inspect
 
-async def _execute_tool_func(action_name: str, tool_args: dict) -> str:
+async def _execute_tool_func(action_name: str, tool_args: dict, config: dict) -> str:
     registry = _get_tool_registry()
     func = registry.get(action_name)
     if not func:
@@ -28,9 +28,12 @@ async def _execute_tool_func(action_name: str, tool_args: dict) -> str:
     
     try:
         logger.info(f"  -> Executing {action_name}({tool_args})")
-        result = func(**tool_args)
-        if inspect.isawaitable(result):
-            result = await result
+        if hasattr(func, "ainvoke"):
+            result = await func.ainvoke(tool_args, config=config)
+        else:
+            result = func(**tool_args)
+            if inspect.isawaitable(result):
+                result = await result
         logger.info(f"  -> {action_name} completed successfully")
         return str(result)
     except Exception as e:
@@ -52,12 +55,17 @@ async def execute_tools_node(state: dict) -> dict:
         return {}
     
     tool_messages = []
+    
+    # Tools like exec_command and delegate_research need the thread_id to inject backgrounds
+    thread_id = state.get("chat_id", "default_thread")
+    config = {"configurable": {"thread_id": thread_id}}
+    
     for tool_call in last_message.tool_calls:
         action_name = tool_call["name"]
         tool_args = tool_call["args"]
         call_id = tool_call["id"]
         
-        result_str = await _execute_tool_func(action_name, tool_args)
+        result_str = await _execute_tool_func(action_name, tool_args, config)
         tool_messages.append(ToolMessage(content=result_str, tool_call_id=call_id))
         
     return {"messages": tool_messages}

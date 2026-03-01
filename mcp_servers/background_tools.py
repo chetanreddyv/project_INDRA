@@ -8,15 +8,15 @@ import asyncio
 import logging
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
-from langchain_core.messages import AIMessage
+import httpx
 
 logger = logging.getLogger(__name__)
 
-async def run_research_task(query: str, thread_id: str):
+async def run_research_task(query: str, thread_id: str, platform: str):
     """
     Background task that actually executes the research via LangGraph.
     """
-    logger.info(f"[Background] Starting true subagent for '{query}' on thread {thread_id}")
+    logger.info(f"[Background] Starting true subagent for '{query}' on thread {thread_id} ({platform})")
     
     try:
         from nodes.subagents import build_researcher_graph
@@ -32,28 +32,33 @@ async def run_research_task(query: str, thread_id: str):
         # We invoke without a checkpointer, making it an ephemeral execution
         result = await researcher_graph.ainvoke(sub_state)
         
+        # Safely parse content (in case of list of dicts from Gemini)
         summary = result["messages"][-1].content
-        
-        from nodes.graph import checkpointer_context, build_graph
-        async with checkpointer_context() as cp:
-            main_graph = build_graph(checkpointer=cp)
+        if isinstance(summary, list):
+            summary = "\n".join(item.get("text", "") for item in summary if isinstance(item, dict) and "text" in item)
             
-            await main_graph.aupdate_state(
-                {"configurable": {"thread_id": thread_id}},
-                {"messages": [AIMessage(content=f"🔔 **[Subagent Report]**\n\n{summary}")]}
+        # Use Universal Gateway instead of hardcoding core architecture
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"http://localhost:8000/api/v1/system/{thread_id}/notify",
+                json={
+                    "message": f"🔔 **[Subagent Report]**\n\n{summary}",
+                    "platform": platform
+                },
+                timeout=10.0
             )
-            logger.info(f"[Background] Injected research results for thread {thread_id}")
             
     except Exception as e:
         logger.error(f"[Background] Subagent task failed: {e}", exc_info=True)
-        # Attempt to inject error report
         try:
-            from nodes.graph import checkpointer_context, build_graph
-            async with checkpointer_context() as cp:
-                main_graph = build_graph(checkpointer=cp)
-                await main_graph.aupdate_state(
-                    {"configurable": {"thread_id": thread_id}},
-                    {"messages": [AIMessage(content=f"🔔 **[Subagent Task Failed]**\nAn error occurred: {str(e)}")]}
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    f"http://localhost:8000/api/v1/system/{thread_id}/notify",
+                    json={
+                        "message": f"🔔 **[Subagent Task Failed]**\nAn error occurred: {str(e)}",
+                        "platform": platform
+                    },
+                    timeout=10.0
                 )
         except Exception:
             pass
@@ -69,10 +74,11 @@ async def delegate_research(query: str, config: RunnableConfig) -> str:
         query: The research topic or question to investigate.
     """
     thread_id = config.get("configurable", {}).get("thread_id", "default_thread")
-    logger.info(f"Delegating research: {query} (thread: {thread_id})")
+    platform = config.get("configurable", {}).get("platform", "telegram")
+    logger.info(f"Delegating research: {query} (thread: {thread_id} via {platform})")
     
     # Fire and forget
-    asyncio.create_task(run_research_task(query, thread_id))
+    asyncio.create_task(run_research_task(query, thread_id, platform))
     
     return f"Background process initiated for research on '{query}'. The system will notify the conversation asynchronously when it completes."
 

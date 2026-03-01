@@ -1,5 +1,4 @@
 import logging
-from langgraph.types import Command
 import asyncio
 
 from core.messaging import IncomingMessageEvent, ResumeEvent, SystemEvent
@@ -11,7 +10,7 @@ async def agent_daemon(graph, event: IncomingMessageEvent) -> dict:
     """
     Unified LangGraph runner for the Event Bus.
     """
-    config = {"configurable": {"thread_id": event.user_id}}
+    config = {"configurable": {"thread_id": event.user_id, "platform": event.platform}}
 
     try:
         async for graph_event in graph.astream(
@@ -88,7 +87,7 @@ async def resume_daemon(graph, event: ResumeEvent) -> dict:
     """
     Unified LangGraph resumer for the Event Bus.
     """
-    config = {"configurable": {"thread_id": event.user_id}}
+    config = {"configurable": {"thread_id": event.user_id, "platform": event.platform}}
     try:
         async for graph_event in graph.astream(
             Command(resume=event.decision),
@@ -132,7 +131,7 @@ async def system_daemon(graph, event: SystemEvent) -> dict:
     Executes in the background using the specified thread_id context.
     Optionally delivers the response via the ChannelManager.
     """
-    config = {"configurable": {"thread_id": event.user_id}}
+    config = {"configurable": {"thread_id": event.user_id, "platform": event.platform}}
 
     try:
         async for graph_event in graph.astream(

@@ -12,10 +12,9 @@ import logging
 logger = logging.getLogger(__name__)
 
 GLOBAL_TOOL_REGISTRY = {}
-PLUGIN_METADATA = {}
 
 def load_plugins():
-    global GLOBAL_TOOL_REGISTRY, PLUGIN_METADATA
+    global GLOBAL_TOOL_REGISTRY
     plugin_dir = os.path.dirname(__file__)
     
     for filename in os.listdir(plugin_dir):
@@ -27,9 +26,6 @@ def load_plugins():
                     registry = getattr(module, "TOOL_REGISTRY")
                     if isinstance(registry, dict):
                         GLOBAL_TOOL_REGISTRY.update(registry)
-                        PLUGIN_METADATA[module_name] = {
-                            "tools": list(registry.keys())
-                        }
                         logger.info(f"✅ Loaded {len(registry)} tools from plugin: {module_name}")
             except Exception as e:
                 logger.error(f"❌ Failed to load plugin {module_name}: {e}")

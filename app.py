@@ -32,6 +32,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Suppress verbose Pydantic-to-Gemini schema warnings
+logging.getLogger("langchain_google_genai._function_utils").setLevel(logging.ERROR)
+
 # ── Globals (initialized at startup) ────────────────────────
 telegram_client: TelegramClient = None
 graph = None
@@ -391,6 +394,37 @@ async def resume_hitl_endpoint(thread_id: str, request: Request):
     await lane_manager.submit(thread_id, worker.resume_daemon, graph, msg)
     
     return {"status": "queued"}
+
+
+@app.post("/api/v1/system/{thread_id}/notify")
+async def system_notify_endpoint(thread_id: str, request: Request):
+    """
+    Standardized Gateway API for external tools and subagents to inject 
+    asynchronous notifications into the graph state and deliver them to the user.
+    """
+    if not graph:
+        return JSONResponse({"error": "Graph not initialized"}, status_code=503)
+
+    body = await request.json()
+    message = body.get("message", "")
+    platform = body.get("platform", "web")
+
+    if not message:
+        return JSONResponse({"error": "Empty message"}, status_code=400)
+
+    logger.info(f"🌐 Gateway API notification received for {thread_id} via {platform}")
+
+    # Inject into LangGraph state directly so the agent remembers it
+    from langchain_core.messages import AIMessage
+    await graph.aupdate_state(
+        {"configurable": {"thread_id": thread_id}},
+        {"messages": [AIMessage(content=message)]}
+    )
+
+    # Deliver to the user's UI
+    await channel_manager.send_message(platform, thread_id, message)
+    
+    return {"status": "delivered"}
 
 
 # ==========================================================

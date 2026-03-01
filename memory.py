@@ -447,10 +447,10 @@ class ZvecMemoryStore:
                 if res.id == HEALTH_ID:
                     continue
                 
-                logger.info(f"  -> Found skill {res.id} with score {res.score:.3f}")
+                logger.debug(f"  -> Found skill {res.id} with score {res.score:.3f}")
                 
                 if res.score < threshold:
-                    logger.info(f"  -> Skipping skill {res.id} (below threshold {threshold})")
+                    logger.debug(f"  -> Skipping skill {res.id} (below threshold {threshold})")
                     continue
                     
                 skill_id = res.id
@@ -461,7 +461,7 @@ class ZvecMemoryStore:
             skill_names = skill_names[:top_k]
             
             if not skill_names:
-                logger.info("  -> No skills above threshold — using general fallback")
+                logger.debug("  -> No skills above threshold — using general fallback")
                 return "You are a helpful personal assistant. Be concise and accurate."
                 
             prompts = []

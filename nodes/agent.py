@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 
 # Paths
 SKILLS_DIR = Path(__file__).parent.parent / "skills"
-MCP_CONFIG_PATH = Path(__file__).parent.parent / "config" / "mcp_config.json"
 IDENTITY_FILE = Path(__file__).parent.parent / "skills" / "identity" / "skill.md"
 
 def _load_identity_prompt() -> str:
@@ -24,11 +23,7 @@ def _load_identity_prompt() -> str:
         return IDENTITY_FILE.read_text()
     return ""
 
-def _load_mcp_config() -> dict:
-    """Load MCP tool configuration."""
-    if MCP_CONFIG_PATH.exists():
-        return json.loads(MCP_CONFIG_PATH.read_text())
-    return {}
+
 
 import re
 
@@ -55,32 +50,16 @@ def _parse_skill_frontmatter(skill_path: Path) -> dict:
             
     return frontmatter
 
-def _get_enabled_tools_and_write_actions() -> tuple[list[str], set[str], dict[str, str]]:
+def _get_enabled_tools_and_write_actions() -> tuple[list[str], set[str]]:
     """
-    Returns enabled tools, write actions, and action-to-skill mapping.
-    Combines static mcp_config.json with dynamically auto-loaded SKILL.md files.
+    Returns enabled tools and write actions.
+    Auto-loads from SKILL.md files.
     """
     # 0. The Standard Library (Core Capabilities available to all skills)
     enabled_tools = {"exec_command", "web_search", "web_fetch", "delegate_research"}
     write_actions = {"exec_command"} # Always protect dangerous core tools
-    action_skill_map = {
-        "exec_command": "core",
-        "web_search": "core", 
-        "web_fetch": "core",
-        "delegate_research": "core"
-    }
     
-    # 1. Load Static / Core configs (from mcp_config.json)
-    config = _load_mcp_config()
-    for skill_name, skill_cfg in config.items():
-        if isinstance(skill_cfg, dict) and skill_cfg.get("enabled", True):
-            for action in skill_cfg.get("tools", []):
-                enabled_tools.add(action)
-                action_skill_map[action] = skill_name
-            for action in skill_cfg.get("write_actions", []):
-                write_actions.add(action)
-
-    # 2. Universal Auto-Loader: Scan all skill.md files
+    # 1. Universal Auto-Loader: Scan all skill.md files
     # Case-insensitive match for skill.md or SKILL.md
     for skill_file in SKILLS_DIR.rglob("*"):
         if skill_file.name.lower() != "skill.md":
@@ -104,16 +83,15 @@ def _get_enabled_tools_and_write_actions() -> tuple[list[str], set[str], dict[st
                 if "exec_command" not in requested_tools:
                     requested_tools.append("exec_command")
 
-        # 3. Register Discovered Tools
+        # 2. Register Discovered Tools
         for action in requested_tools:
             enabled_tools.add(action)
-            action_skill_map[action] = skill_name
             
             # Safety Fallback: Automatically treat 'exec_command' as a write action requiring HITL
             if action in ["exec_command", "write_file", "delete_file"]:
                 write_actions.add(action)
 
-    return list(enabled_tools), write_actions, action_skill_map
+    return list(enabled_tools), write_actions
 
 async def agent_node(state: dict) -> dict:
     """
@@ -157,7 +135,7 @@ async def agent_node(state: dict) -> dict:
     full_system_prompt = "\\n\\n---\\n\\n".join(prompt_parts) + "\\n\\nALWAYS format your output using standard Markdown (use *, _, `, ```, lists). Do NOT use HTML tags. Respond directly to the user."
 
     # ── Build LangChain Tools ─────────────────────────────────────
-    enabled_tool_names, _, _ = _get_enabled_tools_and_write_actions()
+    enabled_tool_names, _ = _get_enabled_tools_and_write_actions()
     
     from mcp_servers import GLOBAL_TOOL_REGISTRY
     
